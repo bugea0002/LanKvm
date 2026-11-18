@@ -21,6 +21,11 @@ public enum MessageType : byte
 
     ClipboardText = 0x30,
     ClipboardImage = 0x31,
+    FileOffer = 0x32,
+    FileTransferRequest = 0x33,
+    FileTransferChunk = 0x34,
+    FileTransferComplete = 0x35,
+    FileTransferError = 0x36,
 
     Heartbeat = 0x40,
     HeartbeatAck = 0x41,

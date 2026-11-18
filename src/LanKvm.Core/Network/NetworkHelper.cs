@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Security.Principal;
+using System.Text;
 using Microsoft.Win32;
 
 namespace LanKvm.Core.Network;
@@ -98,33 +99,76 @@ public static class NetworkHelper
         return principal.IsInRole(WindowsBuiltInRole.Administrator);
     }
 
+    public static string? GetExecutableScopePath(string? processPath = null)
+    {
+        string? exePath = processPath ?? Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(exePath) ||
+            !exePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
+            Path.GetFileName(exePath).Equals("dotnet.exe", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+        return exePath;
+    }
+
+    public static string BuildEnsureFirewallScript(int tcpPort, int udpPort, string? programPath = null)
+    {
+        // Restrict inbound traffic strictly to local/private subnets (and LanKvm.exe binary when available)
+        // so public internet IPs and unrelated processes remain unaffected.
+        const string allowedSubnets = "LocalSubnet,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16";
+        string? scopedProgram = GetExecutableScopePath(programPath ?? Environment.ProcessPath);
+        string programArg = scopedProgram is null
+            ? string.Empty
+            : $" -Program '{scopedProgram.Replace("'", "''")}'";
+
+        return
+            "$ErrorActionPreference='Stop';" +
+            "Remove-NetFirewallRule -DisplayName 'LanKvm-TCP-*','LanKvm-UDP-*' -ErrorAction SilentlyContinue;" +
+            $"New-NetFirewallRule -DisplayName 'LanKvm-TCP-{tcpPort}' -Direction Inbound -Protocol TCP -LocalPort {tcpPort}{programArg} -RemoteAddress {allowedSubnets} -Action Allow -Profile Any | Out-Null;" +
+            $"New-NetFirewallRule -DisplayName 'LanKvm-UDP-{udpPort}' -Direction Inbound -Protocol UDP -LocalPort {udpPort}{programArg} -RemoteAddress {allowedSubnets} -Action Allow -Profile Any | Out-Null;";
+    }
+
+    public static string BuildRemoveFirewallScript() =>
+        "$ErrorActionPreference='Stop';" +
+        "Remove-NetFirewallRule -DisplayName 'LanKvm-TCP-*','LanKvm-UDP-*' -ErrorAction SilentlyContinue;";
+
     public static (bool Success, string Message) EnsureFirewallRules(int tcpPort, int udpPort)
     {
-        // Restrict inbound traffic strictly to local/private subnets so public internet IPs are blocked at OS firewall level.
-        const string allowedSubnets = "LocalSubnet,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16";
-        string psScript =
-            $"$ErrorActionPreference='Stop';" +
-            $"Remove-NetFirewallRule -DisplayName 'LanKvm-TCP-{tcpPort}','LanKvm-UDP-{udpPort}' -ErrorAction SilentlyContinue;" +
-            $"New-NetFirewallRule -DisplayName 'LanKvm-TCP-{tcpPort}' -Direction Inbound -Protocol TCP -LocalPort {tcpPort} -RemoteAddress {allowedSubnets} -Action Allow -Profile Any | Out-Null;" +
-            $"New-NetFirewallRule -DisplayName 'LanKvm-UDP-{udpPort}' -Direction Inbound -Protocol UDP -LocalPort {udpPort} -RemoteAddress {allowedSubnets} -Action Allow -Profile Any | Out-Null;";
+        string script = BuildEnsureFirewallScript(tcpPort, udpPort);
+        return RunElevatedPowerShell(
+            script,
+            $"LanKvm.exe 전용 사설망 인바운드 규칙(TCP {tcpPort} / UDP {udpPort})을 등록했습니다.",
+            "방화벽 규칙 등록");
+    }
 
+    public static (bool Success, string Message) RemoveFirewallRules()
+    {
+        return RunElevatedPowerShell(
+            BuildRemoveFirewallScript(),
+            "등록된 LanKvm 방화벽 규칙을 모두 제거했습니다.",
+            "방화벽 규칙 제거");
+    }
+
+    private static (bool Success, string Message) RunElevatedPowerShell(string script, string successMessage, string actionLabel)
+    {
         try
         {
+            string encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
             var psi = new ProcessStartInfo
             {
                 FileName = "powershell.exe",
-                Arguments = $"-NoProfile -NonInteractive -WindowStyle Hidden -Command \"{psScript}\"",
+                Arguments = $"-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {encoded}",
                 UseShellExecute = true,
                 Verb = IsRunAsAdministrator() ? "" : "runas",
                 CreateNoWindow = true
             };
 
             using var proc = Process.Start(psi);
-            if (proc is null) return (false, "방화벽 설정 프로세스를 시작하지 못했습니다.");
+            if (proc is null) return (false, $"{actionLabel} 프로세스를 시작하지 못했습니다.");
             proc.WaitForExit(15000);
             return proc.ExitCode == 0
-                ? (true, $"사설망 전용 인바운드 방화벽 규칙(TCP {tcpPort} / UDP {udpPort})을 등록했습니다.")
-                : (false, $"방화벽 규칙 등록 실패 (종료 코드 {proc.ExitCode}).");
+                ? (true, successMessage)
+                : (false, $"{actionLabel} 실패 (종료 코드 {proc.ExitCode}).");
         }
         catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
         {
@@ -132,7 +176,7 @@ public static class NetworkHelper
         }
         catch (Exception ex)
         {
-            return (false, $"방화벽 설정 오류: {ex.Message}");
+            return (false, $"{actionLabel} 오류: {ex.Message}");
         }
     }
 
@@ -185,6 +229,7 @@ public static class NetworkHelper
             Process.Start(new ProcessStartInfo
             {
                 FileName = exePath,
+                Arguments = $"--wait-pid {Environment.ProcessId}",
                 UseShellExecute = true,
                 Verb = "runas"
             });

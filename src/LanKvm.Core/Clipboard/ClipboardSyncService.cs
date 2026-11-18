@@ -1,3 +1,4 @@
+using System.Collections.Specialized;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Security.Cryptography;
@@ -7,7 +8,20 @@ using LanKvm.Core.Native;
 
 namespace LanKvm.Core.Clipboard;
 
-public sealed record ClipboardPayload(bool IsImage, byte[] Data);
+public enum ClipboardContentKind
+{
+    Text = 0,
+    Image = 1,
+    FileDrop = 2
+}
+
+public sealed record ClipboardPayload(
+    ClipboardContentKind Kind,
+    byte[] Data,
+    IReadOnlyList<string>? FilePaths = null)
+{
+    public bool IsImage => Kind == ClipboardContentKind.Image;
+}
 
 /// <summary>
 /// Pure helper for deduplicating clipboard contents via SHA-256 so remote updates
@@ -54,7 +68,7 @@ public sealed class ClipboardDeduplicator
 
 /// <summary>
 /// Monitors Windows clipboard updates on a dedicated STA thread, debounces bursts
-/// (e.g. Win+Shift+S), retries transient OpenClipboard locks, and syncs Text & PNG Images.
+/// (e.g. Win+Shift+S), retries transient OpenClipboard locks, and syncs Text, PNG Images, and File Drops.
 /// </summary>
 public sealed class ClipboardSyncService : IDisposable
 {
@@ -135,25 +149,39 @@ public sealed class ClipboardSyncService : IDisposable
 
         _marshalingControl.BeginInvoke(() =>
         {
-            _dedup.MarkRemoteApplied(payload.Data);
-            RunWithClipboardRetry(() =>
+            if (payload.Kind == ClipboardContentKind.FileDrop && payload.FilePaths is { Count: > 0 })
             {
-                if (payload.IsImage)
+                byte[] sig = ComputeFileDropSignature(payload.FilePaths);
+                _dedup.MarkRemoteApplied(sig);
+                RunWithClipboardRetry(() =>
                 {
-                    using var ms = new MemoryStream(payload.Data);
-                    using var img = Image.FromStream(ms);
-                    using var bmp = new Bitmap(img);
-                    System.Windows.Forms.Clipboard.SetImage(bmp);
-                }
-                else
+                    var col = new StringCollection();
+                    foreach (string p in payload.FilePaths) col.Add(p);
+                    System.Windows.Forms.Clipboard.SetFileDropList(col);
+                });
+            }
+            else
+            {
+                _dedup.MarkRemoteApplied(payload.Data);
+                RunWithClipboardRetry(() =>
                 {
-                    string text = Encoding.UTF8.GetString(payload.Data);
-                    if (!string.IsNullOrEmpty(text))
+                    if (payload.IsImage)
                     {
-                        System.Windows.Forms.Clipboard.SetText(text, TextDataFormat.UnicodeText);
+                        using var ms = new MemoryStream(payload.Data);
+                        using var img = Image.FromStream(ms);
+                        using var bmp = new Bitmap(img);
+                        System.Windows.Forms.Clipboard.SetImage(bmp);
                     }
-                }
-            });
+                    else
+                    {
+                        string text = Encoding.UTF8.GetString(payload.Data);
+                        if (!string.IsNullOrEmpty(text))
+                        {
+                            System.Windows.Forms.Clipboard.SetText(text, TextDataFormat.UnicodeText);
+                        }
+                    }
+                });
+            }
             _lastSeq = Win32Interop.GetClipboardSequenceNumber();
         });
     }
@@ -215,6 +243,27 @@ public sealed class ClipboardSyncService : IDisposable
         ClipboardPayload? result = null;
         RunWithClipboardRetry(() =>
         {
+            if (System.Windows.Forms.Clipboard.ContainsFileDropList())
+            {
+                StringCollection list = System.Windows.Forms.Clipboard.GetFileDropList();
+                if (list.Count > 0)
+                {
+                    var paths = new List<string>(list.Count);
+                    foreach (string? p in list)
+                    {
+                        if (!string.IsNullOrWhiteSpace(p)) paths.Add(p);
+                    }
+                    if (paths.Count > 0)
+                    {
+                        result = new ClipboardPayload(
+                            ClipboardContentKind.FileDrop,
+                            ComputeFileDropSignature(paths),
+                            paths);
+                        return;
+                    }
+                }
+            }
+
             if (System.Windows.Forms.Clipboard.ContainsImage())
             {
                 using Image? img = System.Windows.Forms.Clipboard.GetImage();
@@ -224,7 +273,7 @@ public sealed class ClipboardSyncService : IDisposable
                     img.Save(ms, ImageFormat.Png);
                     if (ms.Length > 0 && ms.Length <= MaxImageBytes)
                     {
-                        result = new ClipboardPayload(true, ms.ToArray());
+                        result = new ClipboardPayload(ClipboardContentKind.Image, ms.ToArray());
                         return;
                     }
                 }
@@ -238,13 +287,19 @@ public sealed class ClipboardSyncService : IDisposable
                     byte[] bytes = Encoding.UTF8.GetBytes(text);
                     if (bytes.Length <= MaxTextBytes)
                     {
-                        result = new ClipboardPayload(false, bytes);
+                        result = new ClipboardPayload(ClipboardContentKind.Text, bytes);
                     }
                 }
             }
         });
 
         return result;
+    }
+
+    private static byte[] ComputeFileDropSignature(IReadOnlyList<string> paths)
+    {
+        string joined = string.Join("\n", paths.OrderBy(p => p, StringComparer.OrdinalIgnoreCase));
+        return Encoding.UTF8.GetBytes(joined);
     }
 
     private static void RunWithClipboardRetry(Action action)

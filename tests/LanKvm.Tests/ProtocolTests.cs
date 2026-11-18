@@ -41,6 +41,14 @@ public class ProtocolTests
             PacketCodec.EncodeUpdateChunk(new UpdateChunkPayload(1024, 4096, [1, 2, 3, 4])));
         await PacketCodec.WriteFrameAsync(ms, MessageType.UpdateComplete,
             PacketCodec.EncodeUpdateComplete("DEADBEEF"));
+        await PacketCodec.WriteFrameAsync(ms, MessageType.FileOffer,
+            PacketCodec.EncodeFileOffer(new FileOfferPayload(555UL, ["folder", "a.txt"], [new FileEntryInfo("folder/b.bin", 2048), new FileEntryInfo("a.txt", 12)])));
+        await PacketCodec.WriteFrameAsync(ms, MessageType.FileTransferRequest,
+            PacketCodec.EncodeFileTransferRequest(555UL));
+        await PacketCodec.WriteFrameAsync(ms, MessageType.FileTransferChunk,
+            PacketCodec.EncodeFileTransferChunk(new FileTransferChunkPayload(555UL, 1, 0, [9, 8, 7])));
+        await PacketCodec.WriteFrameAsync(ms, MessageType.FileTransferComplete,
+            PacketCodec.EncodeFileTransferComplete(new FileTransferCompletePayload(555UL, ["SHA1", "SHA2"])));
 
         ms.Position = 0;
 
@@ -112,6 +120,26 @@ public class ProtocolTests
         var f12 = await PacketCodec.ReadFrameAsync(ms);
         var p12 = PacketCodec.DecodeUpdateComplete(f12!.Payload);
         Assert.Equal("DEADBEEF", p12.Sha256Hex);
+
+        var f13 = await PacketCodec.ReadFrameAsync(ms);
+        var p13 = PacketCodec.DecodeFileOffer(f13!.Payload);
+        Assert.Equal(555UL, p13.TransferId);
+        Assert.Equal(["folder", "a.txt"], p13.TopLevelRelativePaths);
+        Assert.Equal(2, p13.Files.Count);
+        Assert.Equal("folder/b.bin", p13.Files[0].RelativePath);
+        Assert.Equal(2048, p13.Files[0].Length);
+
+        var f14 = await PacketCodec.ReadFrameAsync(ms);
+        Assert.Equal(555UL, PacketCodec.DecodeFileTransferRequest(f14!.Payload).TransferId);
+
+        var f15 = await PacketCodec.ReadFrameAsync(ms);
+        var p15 = PacketCodec.DecodeFileTransferChunk(f15!.Payload);
+        Assert.Equal(1, p15.FileIndex);
+        Assert.Equal([9, 8, 7], p15.Data);
+
+        var f16 = await PacketCodec.ReadFrameAsync(ms);
+        var p16 = PacketCodec.DecodeFileTransferComplete(f16!.Payload);
+        Assert.Equal(["SHA1", "SHA2"], p16.FileSha256HexList);
 
         Assert.Null(await PacketCodec.ReadFrameAsync(ms));
     }

@@ -4,7 +4,9 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using LanKvm.Core;
 using LanKvm.Core.Native;
 using LanKvm.Core.Network;
@@ -26,11 +28,15 @@ public partial class MainWindow : Window
     private static readonly SolidColorBrush BrushAmber = CreateFrozenBrush(217, 119, 6);
     private static readonly SolidColorBrush BrushGreen = CreateFrozenBrush(22, 163, 74);
     private static readonly SolidColorBrush BrushBlue = CreateFrozenBrush(2, 132, 199);
+    private static readonly SolidColorBrush BrushTextWhite = CreateFrozenBrush(255, 255, 255);
+    private static readonly SolidColorBrush BrushTextMuted = CreateFrozenBrush(148, 163, 184);
     private static readonly SolidColorBrush BrushTextBlue = CreateFrozenBrush(56, 189, 248);
     private static readonly SolidColorBrush BrushTextGreen = CreateFrozenBrush(74, 222, 128);
     private static readonly SolidColorBrush BrushTextAmber = CreateFrozenBrush(251, 191, 36);
     private static readonly SolidColorBrush BrushAdminOk = CreateFrozenBrush(20, 83, 45);
     private static readonly SolidColorBrush BrushAdminNormal = CreateFrozenBrush(30, 58, 95);
+
+    private static readonly CubicEase PillEase = new() { EasingMode = EasingMode.EaseOut };
 
     private readonly AppConfig _config;
     private readonly List<string> _logLines = new(80);
@@ -43,8 +49,12 @@ public partial class MainWindow : Window
     private ClientStatusSnapshot? _lastClientSnap;
     private TrayDotState? _currentTrayState;
     private string _lastTrayTooltip = string.Empty;
+    private uint _showWindowMessage;
+    private bool _isHostRole = true;
+    private bool _isSettingsOpen;
     private bool _logDirty;
     private bool _allowExit;
+    private bool _cleanedUp;
     private bool _initialized;
 
     public MainWindow(bool startMinimized = false)
@@ -52,7 +62,7 @@ public partial class MainWindow : Window
         InitializeComponent();
 
         _config = ConfigStore.Load();
-        AppTitleText.Text = $"LanKvm v{AppUpdater.GetCurrentVersionString()}";
+        VersionText.Text = $"v{AppUpdater.GetCurrentVersionString()}";
 
         _trayIcons = new Dictionary<TrayDotState, System.Drawing.Icon>
         {
@@ -76,7 +86,7 @@ public partial class MainWindow : Window
 
         if (_config.AutoStartService)
         {
-            if (_config.Role == AppRole.Host)
+            if (_isHostRole)
             {
                 StartHostCore();
             }
@@ -95,6 +105,30 @@ public partial class MainWindow : Window
         {
             NetworkHelper.TrimBackgroundMemory();
         }
+    }
+
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+
+        _showWindowMessage = Win32Interop.RegisterWindowMessage(App.ShowWindowBroadcastName);
+        var helper = new WindowInteropHelper(this);
+        IntPtr hwnd = helper.Handle;
+        if (hwnd != IntPtr.Zero && _showWindowMessage != 0)
+        {
+            Win32Interop.ChangeWindowMessageFilterEx(hwnd, _showWindowMessage, Win32Interop.MSGFLT_ALLOW, IntPtr.Zero);
+            HwndSource.FromHwnd(hwnd)?.AddHook(WndProcHook);
+        }
+    }
+
+    private IntPtr WndProcHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (_showWindowMessage != 0 && (uint)msg == _showWindowMessage)
+        {
+            RestoreFromTray();
+            handled = true;
+        }
+        return IntPtr.Zero;
     }
 
     private static SolidColorBrush CreateFrozenBrush(byte r, byte g, byte b)
@@ -133,6 +167,7 @@ public partial class MainWindow : Window
         var menu = new WinForms.ContextMenuStrip();
         menu.Items.Add("창 열기", null, (_, _) => Dispatcher.Invoke(RestoreFromTray));
         menu.Items.Add("로컬 제어 복구", null, (_, _) => Dispatcher.Invoke(() => _hostSession?.ForceReturnToLocal()));
+        menu.Items.Add("경계 잠금 토글", null, (_, _) => Dispatcher.Invoke(ToggleEdgeLockFromTray));
         menu.Items.Add(new WinForms.ToolStripSeparator());
         menu.Items.Add("종료", null, (_, _) => Dispatcher.Invoke(ExitApplication));
 
@@ -155,18 +190,13 @@ public partial class MainWindow : Window
 
     private void ApplyLoadedConfig()
     {
-        if (_config.Role == AppRole.Host)
-            HostRoleRadio.IsChecked = true;
-        else
-            ClientRoleRadio.IsChecked = true;
+        _isHostRole = _config.Role == AppRole.Host;
 
-        HostTcpPortBox.Text = _config.TcpPort.ToString();
-        HostUdpPortBox.Text = _config.UdpPort.ToString();
+        TcpPortBox.Text = _config.TcpPort.ToString();
+        UdpPortBox.Text = _config.UdpPort.ToString();
         ResistanceBox.Text = _config.EdgeResistancePx.ToString();
 
         ClientHostIpBox.Text = _config.HostIp;
-        ClientTcpPortBox.Text = _config.TcpPort.ToString();
-        ClientUdpPortBox.Text = _config.UdpPort.ToString();
         SensitivitySlider.Value = Math.Clamp(_config.ClientSensitivity, 0.3, 2.5);
         SensitivityLabel.Text = $"{SensitivitySlider.Value:0.0}x";
 
@@ -174,6 +204,8 @@ public partial class MainWindow : Window
         StartWithWindowsCheck.IsChecked = NetworkHelper.IsStartWithWindowsEnabled() || _config.StartWithWindows;
         PrivateNetOnlyCheck.IsChecked = _config.AllowPrivateNetworksOnly;
         ClipboardCheck.IsChecked = _config.ClipboardSyncEnabled;
+        AutoLockFullscreenCheck.IsChecked = _config.AutoLockOnFullscreen;
+        LockScreenEdgeCheck.IsChecked = _config.LockScreenEdge;
         AutoSyncHostCheck.IsChecked = _config.AutoSyncUpdateFromHost;
         GitHubRepoBox.Text = _config.GitHubRepo;
         CheckGitHubOnStartCheck.IsChecked = _config.CheckGitHubUpdatesOnStart;
@@ -187,28 +219,69 @@ public partial class MainWindow : Window
             }
         }
 
-        UpdateRolePanels();
+        foreach (ComboBoxItem item in SwitchHotkeyCombo.Items)
+        {
+            if (string.Equals(item.Tag?.ToString(), _config.SwitchHotkey.ToString(), StringComparison.OrdinalIgnoreCase))
+            {
+                SwitchHotkeyCombo.SelectedItem = item;
+                break;
+            }
+        }
+
+        ApplyRoleVisuals(_isHostRole, animate: false);
+        UpdateHostSummaryText(_config.TrustedClients.Count, "-");
         RefreshClientPairingUi();
+        UpdateEdgeLockChip();
+        UpdateFooterHint();
     }
 
     private void RefreshEnvironmentInfo()
     {
+        string? primaryIp = NetworkHelper.GetPrimaryIPv4Address();
         IReadOnlyList<string> ips = NetworkHelper.GetLocalIPv4Addresses();
-        LocalIpTextBox.Text = ips.Count > 0 ? string.Join(" , ", ips) : "감지된 IPv4 주소 없음";
+        if (!string.IsNullOrWhiteSpace(primaryIp))
+        {
+            LocalIpTextBox.Text = ips.Count > 1 ? $"{primaryIp} (+{ips.Count - 1})" : primaryIp;
+        }
+        else
+        {
+            LocalIpTextBox.Text = ips.Count > 0 ? ips[0] : "감지된 IPv4 주소 없음";
+        }
+        LocalIpTextBox.ToolTip = ips.Count > 0 ? string.Join(Environment.NewLine, ips) : null;
 
         bool isAdmin = NetworkHelper.IsRunAsAdministrator();
-        AdminBadgeText.Text = isAdmin ? "관리자 권한" : "일반 권한";
+        AdminBadgeText.Text = isAdmin ? "권한: 관리자 권한" : "권한: 일반 권한";
         AdminBadge.Background = isAdmin ? BrushAdminOk : BrushAdminNormal;
         ElevateButton.Visibility = isAdmin ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    private void RoleRadio_Changed(object sender, RoutedEventArgs e)
+    private void SettingsToggle_Click(object sender, RoutedEventArgs e)
     {
-        if (!_initialized) return;
-        UpdateRolePanels();
+        _isSettingsOpen = !_isSettingsOpen;
+        MainPairingView.Visibility = _isSettingsOpen ? Visibility.Collapsed : Visibility.Visible;
+        SettingsView.Visibility = _isSettingsOpen ? Visibility.Visible : Visibility.Collapsed;
+        SettingsToggleButton.Content = _isSettingsOpen ? "← 돌아가기" : "⚙ 설정";
+
+        if (_isSettingsOpen)
+        {
+            SettingsView.ScrollToTop();
+            SyncDeferredLogsIfVisible();
+        }
+    }
+
+    private void DesktopRole_Click(object sender, RoutedEventArgs e) => SelectRole(isHost: true);
+
+    private void LaptopRole_Click(object sender, RoutedEventArgs e) => SelectRole(isHost: false);
+
+    private void SelectRole(bool isHost)
+    {
+        if (!_initialized || _isHostRole == isHost) return;
+        _isHostRole = isHost;
+        ApplyRoleVisuals(isHost, animate: true);
+        UpdateFooterHint();
         SaveCurrentConfig();
 
-        if (ClientRoleRadio.IsChecked == true &&
+        if (!isHost &&
             _config.AutoStartService &&
             _clientSession is null &&
             _hostSession is null &&
@@ -218,18 +291,63 @@ public partial class MainWindow : Window
         }
     }
 
-    private void UpdateRolePanels()
+    private void RolePillTrack_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        bool isHost = HostRoleRadio.IsChecked == true;
+        PositionRolePillThumb(_isHostRole, animate: false);
+    }
+
+    private void ApplyRoleVisuals(bool isHost, bool animate)
+    {
+        DesktopRoleText.Foreground = isHost ? BrushTextWhite : BrushTextMuted;
+        LaptopRoleText.Foreground = isHost ? BrushTextMuted : BrushTextWhite;
+        RoleSubtitleText.Text = isHost
+            ? "내 마우스·키보드로 옆 노트북을 함께 제어합니다"
+            : "데스크탑에 연결하여 제어를 받는 노트북입니다";
+
         HostPanel.Visibility = isHost ? Visibility.Visible : Visibility.Collapsed;
         ClientPanel.Visibility = isHost ? Visibility.Collapsed : Visibility.Visible;
+        PositionRolePillThumb(isHost, animate);
+    }
+
+    private void PositionRolePillThumb(bool isHost, bool animate)
+    {
+        double halfWidth = RolePillTrack.ActualWidth / 2.0;
+        if (halfWidth <= 0) return;
+
+        double targetX = isHost ? 0.0 : halfWidth;
+        if (!animate || !IsVisible)
+        {
+            RolePillTransform.BeginAnimation(TranslateTransform.XProperty, null);
+            RolePillTransform.X = targetX;
+            return;
+        }
+
+        var anim = new DoubleAnimation(targetX, TimeSpan.FromMilliseconds(210))
+        {
+            EasingFunction = PillEase
+        };
+        RolePillTransform.BeginAnimation(TranslateTransform.XProperty, anim);
+    }
+
+    private void SetSessionLockState(bool active)
+    {
+        RolePillContainer.IsEnabled = !active;
+        RolePillContainer.Opacity = active ? 0.6 : 1.0;
+        TcpPortBox.IsEnabled = !active;
+        UdpPortBox.IsEnabled = !active;
+    }
+
+    private void PortBox_Changed(object sender, TextChangedEventArgs e)
+    {
+        if (!_initialized) return;
+        ClientEndpoint_Changed(sender, e);
     }
 
     private void ClientEndpoint_Changed(object sender, TextChangedEventArgs e)
     {
         if (!_initialized) return;
         RefreshClientPairingUi();
-        if (ClientRoleRadio.IsChecked == true &&
+        if (!_isHostRole &&
             _config.AutoStartService &&
             _clientSession is null &&
             _hostSession is null &&
@@ -241,7 +359,7 @@ public partial class MainWindow : Window
 
     private bool IsCurrentClientEndpointPaired()
     {
-        string key = $"{ClientHostIpBox.Text.Trim()}:{ClientTcpPortBox.Text.Trim()}";
+        string key = $"{ClientHostIpBox.Text.Trim()}:{TcpPortBox.Text.Trim()}";
         return _config.PairedServers.TryGetValue(key, out PairedServerRecord? rec) &&
                DpapiHelper.TryUnprotectFromBase64(rec.EncryptedTokenBase64) is { Length: > 0 };
     }
@@ -254,13 +372,15 @@ public partial class MainWindow : Window
             ClientPairingStatusText.Text = "페어링 완료 — PIN 입력 없이 자동 연결됩니다";
             ClientPairingStatusText.Foreground = BrushTextGreen;
             ClientPinBox.Text = string.Empty;
-            ClientPinBox.IsEnabled = false;
+            ClientPinEntryPanel.Visibility = Visibility.Collapsed;
+            ClientPairedReadyPanel.Visibility = Visibility.Visible;
         }
         else
         {
             ClientPairingStatusText.Text = "최초 1회 PIN 입력 필요 (이후 자동 연결)";
             ClientPairingStatusText.Foreground = BrushTextAmber;
-            ClientPinBox.IsEnabled = true;
+            ClientPinEntryPanel.Visibility = Visibility.Visible;
+            ClientPairedReadyPanel.Visibility = Visibility.Collapsed;
         }
     }
 
@@ -268,12 +388,75 @@ public partial class MainWindow : Window
     {
         if (!_initialized) return;
         ScreenEdge edge = GetSelectedEdge();
+        SwitchHotkeyMode hotkey = GetSelectedHotkey();
         _config.SwitchEdge = edge;
+        _config.SwitchHotkey = hotkey;
         if (_hostSession is not null)
         {
             _hostSession.SwitchEdge = edge;
+            _hostSession.SwitchHotkey = hotkey;
         }
+        UpdateFooterHint();
         SaveCurrentConfig();
+    }
+
+    private void HostOptionCheck_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!_initialized) return;
+        bool autoLockFs = AutoLockFullscreenCheck.IsChecked == true;
+        bool lockEdge = LockScreenEdgeCheck.IsChecked == true;
+        _config.AutoLockOnFullscreen = autoLockFs;
+        _config.LockScreenEdge = lockEdge;
+        if (_hostSession is not null)
+        {
+            _hostSession.AutoLockOnFullscreen = autoLockFs;
+            _hostSession.LockScreenEdge = lockEdge;
+        }
+        UpdateEdgeLockChip();
+        UpdateFooterHint();
+        SaveCurrentConfig();
+    }
+
+    private void UpdateEdgeLockChip()
+    {
+        HostEdgeLockChip.Visibility = LockScreenEdgeCheck.IsChecked == true
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    private void UpdateFooterHint()
+    {
+        if (!_isHostRole)
+        {
+            MainFooterHintText.Text = "상세 옵션은 우측 상단 ⚙ 설정";
+            return;
+        }
+
+        string edgeName = GetSelectedEdge() switch
+        {
+            ScreenEdge.Left => "왼쪽",
+            ScreenEdge.Right => "오른쪽",
+            ScreenEdge.Top => "위",
+            ScreenEdge.Bottom => "아래",
+            _ => "오른쪽"
+        };
+        string hotkeyName = GetSelectedHotkey() switch
+        {
+            SwitchHotkeyMode.CtrlAltSpace => "Ctrl+Alt+Space",
+            SwitchHotkeyMode.ScrollLock => "ScrollLock",
+            SwitchHotkeyMode.Pause => "Pause",
+            _ => "단축키 없음"
+        };
+        MainFooterHintText.Text = LockScreenEdgeCheck.IsChecked == true
+            ? $"경계 잠금 · {hotkeyName}"
+            : $"{edgeName} 경계 · {hotkeyName}";
+    }
+
+    private void ToggleEdgeLockFromTray()
+    {
+        bool next = LockScreenEdgeCheck.IsChecked != true;
+        LockScreenEdgeCheck.IsChecked = next;
+        AppendLog($"[{DateTime.Now:HH:mm:ss}] {(next ? "경계 이동 잠금됨 (단축키 전환만 활성)" : "경계 이동 잠금 해제됨")}");
     }
 
     private void SensitivitySlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -339,7 +522,7 @@ public partial class MainWindow : Window
 
     private void StartHostCore()
     {
-        if (!TryParsePorts(HostTcpPortBox.Text, HostUdpPortBox.Text, out int tcpPort, out int udpPort)) return;
+        if (!TryParsePorts(TcpPortBox.Text, UdpPortBox.Text, out int tcpPort, out int udpPort)) return;
         if (!int.TryParse(ResistanceBox.Text, out int resistance) || resistance < 0 || resistance > 200)
         {
             ShowError("경계 저항(px)은 0~200 사이 정수를 입력하세요.");
@@ -357,6 +540,9 @@ public partial class MainWindow : Window
                 ConfigStore.HostCertPath,
                 GetSelectedEdge(),
                 resistance,
+                GetSelectedHotkey(),
+                AutoLockFullscreenCheck.IsChecked == true,
+                LockScreenEdgeCheck.IsChecked == true,
                 ClipboardCheck.IsChecked == true,
                 PrivateNetOnlyCheck.IsChecked == true,
                 _config.TrustedClients);
@@ -374,10 +560,9 @@ public partial class MainWindow : Window
             HostStopButton.IsEnabled = true;
             ForceLocalButton.IsEnabled = true;
             OpenPairingButton.IsEnabled = true;
-            HostRoleRadio.IsEnabled = false;
-            ClientRoleRadio.IsEnabled = false;
+            SetSessionLockState(true);
 
-            HostFingerprintText.Text = $"지문: {_hostSession.CertFingerprintShort}";
+            UpdateHostSummaryText(_config.TrustedClients.Count, _hostSession.CertFingerprintShort);
         }
         catch (Exception ex)
         {
@@ -390,16 +575,15 @@ public partial class MainWindow : Window
 
     private void ForceLocal_Click(object sender, RoutedEventArgs e) => _hostSession?.ForceReturnToLocal();
 
-    private void OpenPairing_Click(object sender, RoutedEventArgs e)
-    {
+    private void OpenPairing_Click(object sender, RoutedEventArgs e) =>
         _hostSession?.OpenPairingWindow(TimeSpan.FromMinutes(3));
-    }
 
     private void ClearPairedClients_Click(object sender, RoutedEventArgs e)
     {
         _config.TrustedClients.Clear();
         SaveCurrentConfig();
         _hostSession?.ClearTrustedClients();
+        UpdateHostSummaryText(0, _hostSession?.CertFingerprintShort ?? "-");
         AppendLog($"[{DateTime.Now:HH:mm:ss}] 등록된 노트북 목록을 초기화했습니다.");
     }
 
@@ -413,7 +597,7 @@ public partial class MainWindow : Window
             ShowError("데스크탑(Host) IP 주소를 입력하세요.");
             return;
         }
-        if (!TryParsePorts(ClientTcpPortBox.Text, ClientUdpPortBox.Text, out int tcpPort, out int udpPort)) return;
+        if (!TryParsePorts(TcpPortBox.Text, UdpPortBox.Text, out int tcpPort, out int udpPort)) return;
 
         string key = $"{hostIp}:{tcpPort}";
         _config.PairedServers.TryGetValue(key, out PairedServerRecord? pairedServer);
@@ -423,7 +607,7 @@ public partial class MainWindow : Window
         string pin = ClientPinBox.Text.Trim();
         if (!hasValidToken && (pin.Length != 6 || !pin.All(char.IsDigit)))
         {
-            ShowError("최초 1회 연결을 위해 Host 화면에 표시된 6자리 숫자 PIN을 입력하세요.");
+            ShowError("최초 1회 연결을 위해 데스크탑 화면의 6자리 숫자 PIN을 입력하세요.");
             return;
         }
 
@@ -483,8 +667,7 @@ public partial class MainWindow : Window
 
         ClientConnectButton.IsEnabled = false;
         ClientDisconnectButton.IsEnabled = true;
-        HostRoleRadio.IsEnabled = false;
-        ClientRoleRadio.IsEnabled = false;
+        SetSessionLockState(true);
     }
 
     private void ClientDisconnect_Click(object sender, RoutedEventArgs e) => StopAllSessions();
@@ -492,9 +675,14 @@ public partial class MainWindow : Window
     private async void DiagnoseConnection_Click(object sender, RoutedEventArgs e)
     {
         string ip = ClientHostIpBox.Text.Trim();
-        if (!int.TryParse(ClientTcpPortBox.Text, out int port))
+        if (string.IsNullOrWhiteSpace(ip))
         {
-            ShowError("유효한 TCP 포트를 입력하세요.");
+            ShowError("데스크탑(Host) IP 주소를 먼저 입력하세요.");
+            return;
+        }
+        if (!int.TryParse(TcpPortBox.Text, out int port))
+        {
+            ShowError("⚙ 설정에서 유효한 TCP 포트를 입력하세요.");
             return;
         }
 
@@ -508,7 +696,7 @@ public partial class MainWindow : Window
             AppendLog($"[{DateTime.Now:HH:mm:ss}] 성공! {ip}:{port} TCP 도달 가능합니다.");
             System.Windows.MessageBox.Show(
                 $"성공! {ip}:{port} 포트로 연결할 수 있습니다.",
-                "연결 테스트 성공",
+                "연결 확인 완료",
                 MessageBoxButton.OK,
                 MessageBoxImage.Information);
         }
@@ -516,8 +704,8 @@ public partial class MainWindow : Window
         {
             AppendLog($"[{DateTime.Now:HH:mm:ss}] 연결 테스트 실패 ({ip}:{port}): {ex.Message}");
             System.Windows.MessageBox.Show(
-                $"{ip}:{port}에 접속할 수 없습니다.\n\n확인 사항:\n1) 데스크탑에서 Host가 실행 중인지\n2) 데스크탑에서 '사설망 방화벽'을 실행했는지\n3) 두 망이 서로 분리된 회선이 아닌지 확인하세요.\n\n오류: {ex.Message}",
-                "연결 테스트 실패",
+                $"{ip}:{port}에 접속할 수 없습니다.\n\n확인 사항:\n1) 데스크탑에서 '서버 시작' 상태인지\n2) 데스크탑 ⚙ 설정에서 '사설망 방화벽 허용'을 실행했는지\n3) 두 기기가 같은 공유기(사설망)에 있는지 확인하세요.\n\n오류: {ex.Message}",
+                "연결 확인 실패",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
         }
@@ -529,6 +717,10 @@ public partial class MainWindow : Window
 
     private void ResetTrust_Click(object sender, RoutedEventArgs e)
     {
+        if (_clientSession is not null)
+        {
+            StopAllSessions();
+        }
         _config.PairedServers.Clear();
         _config.TrustedServerFingerprints.Clear();
         SaveCurrentConfig();
@@ -538,12 +730,23 @@ public partial class MainWindow : Window
 
     private void FirewallButton_Click(object sender, RoutedEventArgs e)
     {
-        if (!TryParsePorts(HostTcpPortBox.Text, HostUdpPortBox.Text, out int tcpPort, out int udpPort)) return;
+        if (!TryParsePorts(TcpPortBox.Text, UdpPortBox.Text, out int tcpPort, out int udpPort)) return;
         var (ok, message) = NetworkHelper.EnsureFirewallRules(tcpPort, udpPort);
         AppendLog($"[{DateTime.Now:HH:mm:ss}] {message}");
         System.Windows.MessageBox.Show(
             message,
-            ok ? "사설망 방화벽 설정 완료" : "방화벽 설정 안내",
+            ok ? "방화벽 설정 완료" : "방화벽 설정 안내",
+            MessageBoxButton.OK,
+            ok ? MessageBoxImage.Information : MessageBoxImage.Warning);
+    }
+
+    private void RemoveFirewallButton_Click(object sender, RoutedEventArgs e)
+    {
+        var (ok, message) = NetworkHelper.RemoveFirewallRules();
+        AppendLog($"[{DateTime.Now:HH:mm:ss}] {message}");
+        System.Windows.MessageBox.Show(
+            message,
+            ok ? "방화벽 규칙 제거" : "방화벽 규칙 제거 안내",
             MessageBoxButton.OK,
             ok ? MessageBoxImage.Information : MessageBoxImage.Warning);
     }
@@ -561,7 +764,7 @@ public partial class MainWindow : Window
         {
             if (!silentIfUpToDate)
             {
-                ShowError("GitHub 저장소(예: username/LanKvm)를 먼저 입력하세요.");
+                ShowError("GitHub 저장소(예: bugea0002/LanKvm)를 먼저 입력하세요.");
             }
             return;
         }
@@ -652,6 +855,11 @@ public partial class MainWindow : Window
         }
     }
 
+    private void UpdateHostSummaryText(int pairedCount, string certFpShort)
+    {
+        HostPairedSummaryText.Text = $"등록 기기: {pairedCount}대 · 지문 {certFpShort}";
+    }
+
     private void ApplyHostStatus(HostStatusSnapshot snap)
     {
         _lastHostSnap = snap;
@@ -668,18 +876,18 @@ public partial class MainWindow : Window
         {
             HostPairingStateLabel.Text = snap.PairedDeviceCount == 0
                 ? "페어링 PIN 번호 (최초 1회만 노트북에 입력)"
-                : $"새 기기 페어링 창 열림 (등록 {snap.PairedDeviceCount}대)";
+                : $"새 기기 페어링 허용 중 (등록 {snap.PairedDeviceCount}대)";
             HostPinText.Text = snap.Pin;
             HostPinText.Foreground = BrushTextBlue;
         }
         else
         {
-            HostPairingStateLabel.Text = $"보안 잠금됨 — 등록 기기 {snap.PairedDeviceCount}대 자동 인증 (새 기기 추가 시 우측 버튼)";
+            HostPairingStateLabel.Text = $"보안 잠금됨 — 등록 기기 {snap.PairedDeviceCount}대 자동 인증";
             HostPinText.Text = "잠금됨";
             HostPinText.Foreground = BrushTextGreen;
         }
 
-        HostFingerprintText.Text = $"지문: {snap.CertFingerprintShort}";
+        UpdateHostSummaryText(snap.PairedDeviceCount, snap.CertFingerprintShort);
         StatusDetailText.Text = snap.StatusMessage;
 
         if (snap.IsRemoteControlling)
@@ -688,7 +896,7 @@ public partial class MainWindow : Window
         }
         else if (snap.IsClientConnected)
         {
-            SetStatusBadge("노트북 연결됨", BrushGreen);
+            SetStatusBadge("연결됨", BrushGreen);
         }
         else
         {
@@ -718,27 +926,25 @@ public partial class MainWindow : Window
 
         if (snap.IsControlledByHost)
         {
-            SetStatusBadge("원격 제어 수신 중", BrushBlue);
+            SetStatusBadge("원격 제어 중", BrushBlue);
         }
         else if (snap.IsConnected)
         {
-            SetStatusBadge("Host 연결됨", BrushGreen);
+            SetStatusBadge("연결됨", BrushGreen);
         }
         else if (snap.IsConnecting || snap.IsAutoReconnecting)
         {
-            SetStatusBadge("자동 연결 대기 중", BrushAmber);
+            SetStatusBadge("연결 대기 중", BrushAmber);
             ClientConnectButton.IsEnabled = false;
             ClientDisconnectButton.IsEnabled = true;
-            HostRoleRadio.IsEnabled = false;
-            ClientRoleRadio.IsEnabled = false;
+            SetSessionLockState(true);
         }
         else
         {
             SetStatusBadge("연결 안 됨", BrushSlate);
             ClientConnectButton.IsEnabled = true;
             ClientDisconnectButton.IsEnabled = false;
-            HostRoleRadio.IsEnabled = true;
-            ClientRoleRadio.IsEnabled = true;
+            SetSessionLockState(false);
         }
 
         ClientMetricsText.Text = snap.IsConnected
@@ -779,15 +985,14 @@ public partial class MainWindow : Window
         OpenPairingButton.IsEnabled = false;
         ClientConnectButton.IsEnabled = true;
         ClientDisconnectButton.IsEnabled = false;
-        HostRoleRadio.IsEnabled = true;
-        ClientRoleRadio.IsEnabled = true;
+        SetSessionLockState(false);
 
         SetStatusBadge("대기 중", BrushIdle);
-        StatusDetailText.Text = "역할을 선택하고 시작 버튼을 누르세요.";
+        StatusDetailText.Text = "역할을 확인하고 시작 버튼을 누르세요.";
         HostMetricsText.Text = "채널: - | RTT: -";
         ClientMetricsText.Text = "모션 채널: -";
         HostPinText.Text = "------";
-        HostFingerprintText.Text = "지문: -";
+        UpdateHostSummaryText(_config.TrustedClients.Count, "-");
         SetTrayState(TrayDotState.Idle);
         SetTrayTooltip("LanKvm — 대기 중");
     }
@@ -800,7 +1005,7 @@ public partial class MainWindow : Window
             _logLines.RemoveAt(0);
         }
 
-        if (IsVisible)
+        if (IsVisible && _isSettingsOpen)
         {
             LogTextBox.Text = string.Join(Environment.NewLine, _logLines);
             LogTextBox.ScrollToEnd();
@@ -812,11 +1017,22 @@ public partial class MainWindow : Window
         }
     }
 
+    private void SyncDeferredLogsIfVisible()
+    {
+        if (!_logDirty || !IsVisible || !_isSettingsOpen) return;
+        LogTextBox.Text = string.Join(Environment.NewLine, _logLines);
+        LogTextBox.ScrollToEnd();
+        _logDirty = false;
+    }
+
     private void SaveCurrentConfig()
     {
-        _config.Role = HostRoleRadio.IsChecked == true ? AppRole.Host : AppRole.Client;
+        _config.Role = _isHostRole ? AppRole.Host : AppRole.Client;
         _config.HostIp = ClientHostIpBox.Text.Trim();
         _config.SwitchEdge = GetSelectedEdge();
+        _config.SwitchHotkey = GetSelectedHotkey();
+        _config.AutoLockOnFullscreen = AutoLockFullscreenCheck.IsChecked == true;
+        _config.LockScreenEdge = LockScreenEdgeCheck.IsChecked == true;
         _config.ClientSensitivity = Math.Round(SensitivitySlider.Value, 1);
         _config.ClipboardSyncEnabled = ClipboardCheck.IsChecked == true;
         _config.AutoStartService = AutoStartServiceCheck.IsChecked == true;
@@ -826,10 +1042,8 @@ public partial class MainWindow : Window
         _config.GitHubRepo = GitHubRepoBox.Text.Trim();
         _config.CheckGitHubUpdatesOnStart = CheckGitHubOnStartCheck.IsChecked == true;
 
-        string tcpStr = _config.Role == AppRole.Host ? HostTcpPortBox.Text : ClientTcpPortBox.Text;
-        string udpStr = _config.Role == AppRole.Host ? HostUdpPortBox.Text : ClientUdpPortBox.Text;
-        if (int.TryParse(tcpStr, out int tcpPort)) _config.TcpPort = tcpPort;
-        if (int.TryParse(udpStr, out int udpPort)) _config.UdpPort = udpPort;
+        if (int.TryParse(TcpPortBox.Text, out int tcpPort)) _config.TcpPort = tcpPort;
+        if (int.TryParse(UdpPortBox.Text, out int udpPort)) _config.UdpPort = udpPort;
         if (int.TryParse(ResistanceBox.Text, out int res)) _config.EdgeResistancePx = res;
 
         ConfigStore.Save(_config);
@@ -845,6 +1059,16 @@ public partial class MainWindow : Window
         return ScreenEdge.Right;
     }
 
+    private SwitchHotkeyMode GetSelectedHotkey()
+    {
+        if (SwitchHotkeyCombo.SelectedItem is ComboBoxItem item &&
+            Enum.TryParse<SwitchHotkeyMode>(item.Tag?.ToString(), out SwitchHotkeyMode mode))
+        {
+            return mode;
+        }
+        return SwitchHotkeyMode.CtrlAltSpace;
+    }
+
     private static bool TryParsePorts(string tcpStr, string udpStr, out int tcpPort, out int udpPort)
     {
         tcpPort = 24800;
@@ -853,7 +1077,7 @@ public partial class MainWindow : Window
             !int.TryParse(udpStr, out udpPort) || udpPort is < 1024 or > 65535 ||
             tcpPort == udpPort)
         {
-            ShowError("TCP와 UDP 포트는 서로 다른 1024~65535 범위의 포트 번호를 입력하세요.");
+            ShowError("⚙ 설정의 TCP/UDP 포트는 서로 다른 1024~65535 번호여야 합니다.");
             return false;
         }
         return true;
@@ -862,20 +1086,23 @@ public partial class MainWindow : Window
     private static void ShowError(string message) =>
         System.Windows.MessageBox.Show(message, "입력 확인", MessageBoxButton.OK, MessageBoxImage.Warning);
 
-    private void RestoreFromTray()
+    public void RestoreFromTray()
     {
         Show();
-        WindowState = WindowState.Normal;
+        if (WindowState == WindowState.Minimized)
+        {
+            WindowState = WindowState.Normal;
+        }
+
+        // Brief topmost pulse guarantees the restored window surfaces cleanly over background windows.
+        Topmost = true;
+        Topmost = false;
         Activate();
 
+        PositionRolePillThumb(_isHostRole, animate: false);
         if (_lastHostSnap is not null) ApplyHostStatus(_lastHostSnap);
         if (_lastClientSnap is not null) ApplyClientStatus(_lastClientSnap);
-        if (_logDirty)
-        {
-            LogTextBox.Text = string.Join(Environment.NewLine, _logLines);
-            LogTextBox.ScrollToEnd();
-            _logDirty = false;
-        }
+        SyncDeferredLogsIfVisible();
     }
 
     private void Window_Closing(object? sender, CancelEventArgs e)
@@ -901,6 +1128,9 @@ public partial class MainWindow : Window
 
     public void ForceCleanup()
     {
+        if (_cleanedUp) return;
+        _cleanedUp = true;
+
         SaveCurrentConfig();
         StopAllSessions();
         _trayIcon.Visible = false;

@@ -34,7 +34,20 @@ public readonly record struct UpdateChunkPayload(long Offset, long TotalLength, 
 
 public readonly record struct UpdateCompletePayload(string Sha256Hex);
 
-public readonly record struct SwitchScreenPayload(bool ToClient, ScreenEdge EntryEdge, float Ratio);
+public readonly record struct FileEntryInfo(string RelativePath, long Length);
+
+public readonly record struct FileOfferPayload(
+    ulong TransferId,
+    IReadOnlyList<string> TopLevelRelativePaths,
+    IReadOnlyList<FileEntryInfo> Files);
+
+public readonly record struct FileTransferRequestPayload(ulong TransferId);
+
+public readonly record struct FileTransferChunkPayload(ulong TransferId, int FileIndex, long Offset, byte[] Data);
+
+public readonly record struct FileTransferCompletePayload(ulong TransferId, IReadOnlyList<string> FileSha256HexList);
+
+public readonly record struct SwitchScreenPayload(bool ToClient, ScreenEdge EntryEdge, float Ratio, bool IsHotkeyToggle = false);
 
 public readonly record struct EdgeReturnPayload(ScreenEdge ReturnEdge, float Ratio);
 
@@ -259,15 +272,20 @@ public static class PacketCodec
 
     public static byte[] EncodeSwitchScreen(in SwitchScreenPayload p)
     {
-        byte[] buf = new byte[6];
+        byte[] buf = new byte[7];
         buf[0] = p.ToClient ? (byte)1 : (byte)0;
         buf[1] = (byte)p.EntryEdge;
         BinaryPrimitives.WriteSingleLittleEndian(buf.AsSpan(2, 4), p.Ratio);
+        buf[6] = p.IsHotkeyToggle ? (byte)1 : (byte)0;
         return buf;
     }
 
     public static SwitchScreenPayload DecodeSwitchScreen(ReadOnlySpan<byte> data) =>
-        new(data[0] != 0, (ScreenEdge)data[1], BinaryPrimitives.ReadSingleLittleEndian(data.Slice(2, 4)));
+        new(
+            data[0] != 0,
+            (ScreenEdge)data[1],
+            BinaryPrimitives.ReadSingleLittleEndian(data.Slice(2, 4)),
+            data.Length >= 7 && data[6] != 0);
 
     public static byte[] EncodeEdgeReturn(in EdgeReturnPayload p)
     {
@@ -336,6 +354,98 @@ public static class PacketCodec
 
     public static long DecodeHeartbeat(ReadOnlySpan<byte> data) =>
         BinaryPrimitives.ReadInt64LittleEndian(data);
+
+    public static byte[] EncodeFileOffer(in FileOfferPayload p)
+    {
+        using var ms = new MemoryStream();
+        using var bw = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: true);
+        bw.Write(p.TransferId);
+        bw.Write(p.TopLevelRelativePaths.Count);
+        foreach (string top in p.TopLevelRelativePaths)
+        {
+            bw.Write(top);
+        }
+        bw.Write(p.Files.Count);
+        foreach (FileEntryInfo f in p.Files)
+        {
+            bw.Write(f.RelativePath);
+            bw.Write(f.Length);
+        }
+        bw.Flush();
+        return ms.ToArray();
+    }
+
+    public static FileOfferPayload DecodeFileOffer(byte[] data)
+    {
+        using var ms = new MemoryStream(data);
+        using var br = new BinaryReader(ms, Encoding.UTF8, leaveOpen: true);
+        ulong id = br.ReadUInt64();
+        int topCount = br.ReadInt32();
+        if (topCount < 0 || topCount > 256) throw new InvalidDataException("Invalid top-level file count.");
+        var tops = new List<string>(topCount);
+        for (int i = 0; i < topCount; i++) tops.Add(br.ReadString());
+
+        int fileCount = br.ReadInt32();
+        if (fileCount < 0 || fileCount > 500) throw new InvalidDataException("Invalid file entry count.");
+        var files = new List<FileEntryInfo>(fileCount);
+        for (int i = 0; i < fileCount; i++)
+        {
+            string rel = br.ReadString();
+            long len = br.ReadInt64();
+            files.Add(new FileEntryInfo(rel, len));
+        }
+        return new FileOfferPayload(id, tops, files);
+    }
+
+    public static byte[] EncodeFileTransferRequest(ulong transferId)
+    {
+        byte[] buf = new byte[8];
+        BinaryPrimitives.WriteUInt64LittleEndian(buf, transferId);
+        return buf;
+    }
+
+    public static FileTransferRequestPayload DecodeFileTransferRequest(ReadOnlySpan<byte> data) =>
+        new(BinaryPrimitives.ReadUInt64LittleEndian(data));
+
+    public static byte[] EncodeFileTransferChunk(in FileTransferChunkPayload p)
+    {
+        byte[] buf = new byte[20 + p.Data.Length];
+        BinaryPrimitives.WriteUInt64LittleEndian(buf.AsSpan(0, 8), p.TransferId);
+        BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(8, 4), p.FileIndex);
+        BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(12, 8), p.Offset);
+        p.Data.CopyTo(buf.AsSpan(20));
+        return buf;
+    }
+
+    public static FileTransferChunkPayload DecodeFileTransferChunk(ReadOnlySpan<byte> data) =>
+        new(
+            BinaryPrimitives.ReadUInt64LittleEndian(data.Slice(0, 8)),
+            BinaryPrimitives.ReadInt32LittleEndian(data.Slice(8, 4)),
+            BinaryPrimitives.ReadInt64LittleEndian(data.Slice(12, 8)),
+            data.Slice(20).ToArray());
+
+    public static byte[] EncodeFileTransferComplete(in FileTransferCompletePayload p)
+    {
+        using var ms = new MemoryStream();
+        using var bw = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: true);
+        bw.Write(p.TransferId);
+        bw.Write(p.FileSha256HexList.Count);
+        foreach (string sha in p.FileSha256HexList) bw.Write(sha);
+        bw.Flush();
+        return ms.ToArray();
+    }
+
+    public static FileTransferCompletePayload DecodeFileTransferComplete(byte[] data)
+    {
+        using var ms = new MemoryStream(data);
+        using var br = new BinaryReader(ms, Encoding.UTF8, leaveOpen: true);
+        ulong id = br.ReadUInt64();
+        int count = br.ReadInt32();
+        if (count < 0 || count > 500) throw new InvalidDataException("Invalid SHA list count.");
+        var hashes = new List<string>(count);
+        for (int i = 0; i < count; i++) hashes.Add(br.ReadString());
+        return new FileTransferCompletePayload(id, hashes);
+    }
 
     private static void WriteBytes16(byte[] dest, ref int pos, ReadOnlySpan<byte> src)
     {

@@ -12,7 +12,7 @@ public abstract record CapturedInputEvent;
 public sealed record CapturedMouseButtonEvent(MouseButtonKind Button, bool IsDown) : CapturedInputEvent;
 public sealed record CapturedMouseWheelEvent(int Delta, bool IsHorizontal) : CapturedInputEvent;
 public sealed record CapturedKeyEvent(ushort VirtualKey, ushort ScanCode, bool IsExtended, bool IsKeyUp) : CapturedInputEvent;
-public sealed record CapturedSwitchToClientEvent(ScreenEdge HostEdge, float Ratio) : CapturedInputEvent;
+public sealed record CapturedSwitchScreenEvent(bool ToClient, ScreenEdge HostEdge, float Ratio, bool IsHotkeyToggle) : CapturedInputEvent;
 
 /// <summary>
 /// Captures mouse deltas via Raw Input (WM_INPUT) and intercepts clicks/keys via
@@ -43,9 +43,14 @@ public sealed class HostInputEngine : IDisposable
 
     private volatile bool _canSwitchToRemote;
     private volatile ScreenEdge _switchEdge = ScreenEdge.Right;
+    private volatile SwitchHotkeyMode _switchHotkey = SwitchHotkeyMode.CtrlAltSpace;
+    private volatile bool _autoLockOnFullscreen = true;
+    private volatile bool _lockScreenEdge;
     private volatile bool _disposed;
 
     private ScreenRect _cachedVirtualBounds;
+    private Win32Interop.POINT? _savedHotkeyLocalPos;
+    private long _lastFullscreenLogTickMs = -10000;
     private bool _hasLastAbs;
     private int _lastAbsX;
     private int _lastAbsY;
@@ -53,6 +58,7 @@ public sealed class HostInputEngine : IDisposable
     public event Action? EmergencyEscapeTriggered;
     public event Action<bool>? RemoteStateChanged;
     public event Action? CursorRepositionBlocked;
+    public event Action<string>? InfoNotice;
 
     public HostInputEngine(MotionCoalescer motionCoalescer, int edgeResistancePixels = 16, long cooldownMs = 150)
     {
@@ -68,6 +74,24 @@ public sealed class HostInputEngine : IDisposable
     {
         get => _switchEdge;
         set => _switchEdge = value;
+    }
+
+    public SwitchHotkeyMode SwitchHotkey
+    {
+        get => _switchHotkey;
+        set => _switchHotkey = value;
+    }
+
+    public bool AutoLockOnFullscreen
+    {
+        get => _autoLockOnFullscreen;
+        set => _autoLockOnFullscreen = value;
+    }
+
+    public bool LockScreenEdge
+    {
+        get => _lockScreenEdge;
+        set => _lockScreenEdge = value;
     }
 
     public bool CanSwitchToRemote
@@ -189,7 +213,7 @@ public sealed class HostInputEngine : IDisposable
         }
     }
 
-    public void ForceReturnToLocal(float ratio)
+    public void ForceReturnToLocal(float ratio, bool isHotkeyToggle = false)
     {
         if (_disposed || _appContext is null || _rawWindow is null) return;
 
@@ -204,7 +228,18 @@ public sealed class HostInputEngine : IDisposable
 
             RefreshVirtualBounds();
             ScreenRect bounds = _cachedVirtualBounds;
-            var (rx, ry) = EdgeSwitchStateMachine.ComputeEntryPoint(bounds, edge, ratio, insetPx: 8);
+            int rx, ry;
+            if (isHotkeyToggle && _savedHotkeyLocalPos is { } saved)
+            {
+                rx = Math.Clamp(saved.X, bounds.Left, bounds.Right);
+                ry = Math.Clamp(saved.Y, bounds.Top, bounds.Bottom);
+                _savedHotkeyLocalPos = null;
+            }
+            else
+            {
+                (rx, ry) = EdgeSwitchStateMachine.ComputeEntryPoint(bounds, edge, ratio, insetPx: 8);
+            }
+
             bool moved = Win32Interop.SetCursorPos(rx, ry);
             _overlay?.HideOverlay();
 
@@ -222,18 +257,54 @@ public sealed class HostInputEngine : IDisposable
         }
     }
 
-    private void EnterRemoteMode(ScreenRect bounds, float ratio)
+    private void EnterRemoteMode(ScreenRect bounds, float ratio, bool isHotkeyToggle = false)
     {
         _motionCoalescer.Reset();
         _hasLastAbs = false;
 
         _overlay?.ShowOverVirtualScreen(bounds);
-        var (parkX, parkY) = EdgeSwitchStateMachine.ComputeEntryPoint(bounds, _switchEdge, ratio, insetPx: 2);
-        Win32Interop.SetCursorPos(parkX, parkY);
+        if (isHotkeyToggle && _savedHotkeyLocalPos is { } saved)
+        {
+            Win32Interop.SetCursorPos(saved.X, saved.Y);
+        }
+        else
+        {
+            var (parkX, parkY) = EdgeSwitchStateMachine.ComputeEntryPoint(bounds, _switchEdge, ratio, insetPx: 2);
+            Win32Interop.SetCursorPos(parkX, parkY);
+        }
 
-        _events.Writer.TryWrite(new CapturedSwitchToClientEvent(_switchEdge, ratio));
+        _events.Writer.TryWrite(new CapturedSwitchScreenEvent(true, _switchEdge, ratio, isHotkeyToggle));
         RemoteStateChanged?.Invoke(true);
     }
+
+    private void ToggleRemoteByHotkey()
+    {
+        if (_disposed || !_canSwitchToRemote) return;
+
+        if (_stateMachine.IsRemote)
+        {
+            ForceReturnToLocal(0.5f, isHotkeyToggle: true);
+            _events.Writer.TryWrite(new CapturedSwitchScreenEvent(false, _switchEdge, 0.5f, true));
+            return;
+        }
+
+        RefreshVirtualBounds();
+        if (Win32Interop.GetCursorPos(out var pt))
+        {
+            _savedHotkeyLocalPos = pt;
+        }
+        _stateMachine.EnterRemote(_clock.ElapsedMilliseconds);
+        EnterRemoteMode(_cachedVirtualBounds, 0.5f, isHotkeyToggle: true);
+    }
+
+    private static bool IsCursorAtEdge(int x, int y, ScreenRect bounds, ScreenEdge edge) => edge switch
+    {
+        ScreenEdge.Right => x >= bounds.Right,
+        ScreenEdge.Left => x <= bounds.Left,
+        ScreenEdge.Bottom => y >= bounds.Bottom,
+        ScreenEdge.Top => y <= bounds.Top,
+        _ => false
+    };
 
     private void HandleRawMouseInput(Win32Interop.RAWMOUSE mouse)
     {
@@ -268,14 +339,28 @@ public sealed class HostInputEngine : IDisposable
             return;
         }
 
-        if (!_canSwitchToRemote) return;
+        if (!_canSwitchToRemote || _lockScreenEdge) return;
 
         if (Win32Interop.GetCursorPos(out var pt))
         {
             ScreenRect bounds = _cachedVirtualBounds;
+            if (IsCursorAtEdge(pt.X, pt.Y, bounds, _switchEdge) &&
+                _autoLockOnFullscreen &&
+                FullscreenDetector.IsForegroundFullscreen())
+            {
+                long now = _clock.ElapsedMilliseconds;
+                if (now - _lastFullscreenLogTickMs > 8000)
+                {
+                    _lastFullscreenLogTickMs = now;
+                    InfoNotice?.Invoke("전체화면 앱/게임 감지 — 경계 전환 잠금 중 (단축키로 전환 가능)");
+                }
+                return;
+            }
+
             if (_stateMachine.TryShouldSwitchToClient(
                     pt.X, pt.Y, dx, dy, bounds, _switchEdge, _clock.ElapsedMilliseconds, out float ratio))
             {
+                _savedHotkeyLocalPos = null;
                 EnterRemoteMode(bounds, ratio);
             }
         }
@@ -346,32 +431,49 @@ public sealed class HostInputEngine : IDisposable
 
     private IntPtr KeyboardHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (nCode >= 0 && _stateMachine.IsRemote)
+        if (nCode >= 0 && _canSwitchToRemote)
         {
             var kb = Marshal.PtrToStructure<Win32Interop.KBDLLHOOKSTRUCT>(lParam);
             bool isKeyUp = (kb.flags & Win32Interop.LLKHF_UP) != 0;
             bool isExtended = (kb.flags & Win32Interop.LLKHF_EXTENDED) != 0;
 
-            if (!isKeyUp && kb.vkCode == Win32Interop.VK_ESCAPE && IsCtrlAltHeld())
+            if (!isKeyUp && IsConfiguredToggleHotkey((int)kb.vkCode))
             {
-                _marshalingControl?.BeginInvoke(() =>
-                {
-                    ForceReturnToLocal(0.5f);
-                    EmergencyEscapeTriggered?.Invoke();
-                });
+                _marshalingControl?.BeginInvoke(ToggleRemoteByHotkey);
                 return (IntPtr)1;
             }
 
-            _events.Writer.TryWrite(new CapturedKeyEvent(
-                (ushort)kb.vkCode,
-                (ushort)kb.scanCode,
-                isExtended,
-                isKeyUp));
-            return (IntPtr)1;
+            if (_stateMachine.IsRemote)
+            {
+                if (!isKeyUp && kb.vkCode == Win32Interop.VK_ESCAPE && IsCtrlAltHeld())
+                {
+                    _marshalingControl?.BeginInvoke(() =>
+                    {
+                        ForceReturnToLocal(0.5f);
+                        EmergencyEscapeTriggered?.Invoke();
+                    });
+                    return (IntPtr)1;
+                }
+
+                _events.Writer.TryWrite(new CapturedKeyEvent(
+                    (ushort)kb.vkCode,
+                    (ushort)kb.scanCode,
+                    isExtended,
+                    isKeyUp));
+                return (IntPtr)1;
+            }
         }
 
         return Win32Interop.CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
     }
+
+    private bool IsConfiguredToggleHotkey(int vkCode) => _switchHotkey switch
+    {
+        SwitchHotkeyMode.CtrlAltSpace => vkCode == Win32Interop.VK_SPACE && IsCtrlAltHeld(),
+        SwitchHotkeyMode.ScrollLock => vkCode == Win32Interop.VK_SCROLL,
+        SwitchHotkeyMode.Pause => vkCode == Win32Interop.VK_PAUSE,
+        _ => false
+    };
 
     private static bool IsCtrlAltHeld()
     {

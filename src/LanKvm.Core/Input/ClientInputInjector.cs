@@ -53,7 +53,7 @@ public sealed class ClientInputInjector : IDisposable
         _cachedBounds = new ScreenRect(vLeft, vTop, vWidth, vHeight);
     }
 
-    public void ActivateFromHost(ScreenEdge hostSwitchEdge, float ratio)
+    public void ActivateFromHost(ScreenEdge hostSwitchEdge, float ratio, bool isHotkeyToggle = false)
     {
         _hostSwitchEdge = hostSwitchEdge;
         _subPixel.Reset();
@@ -61,9 +61,12 @@ public sealed class ClientInputInjector : IDisposable
         _isControlledByHost = true;
 
         RefreshBounds();
-        ScreenEdge entryEdge = EdgeSwitchStateMachine.OppositeEdge(hostSwitchEdge);
-        var (x, y) = EdgeSwitchStateMachine.ComputeEntryPoint(_cachedBounds, entryEdge, ratio, insetPx: 8);
-        Win32Interop.SetCursorPos(x, y);
+        if (!isHotkeyToggle)
+        {
+            ScreenEdge entryEdge = EdgeSwitchStateMachine.OppositeEdge(hostSwitchEdge);
+            var (x, y) = EdgeSwitchStateMachine.ComputeEntryPoint(_cachedBounds, entryEdge, ratio, insetPx: 8);
+            Win32Interop.SetCursorPos(x, y);
+        }
     }
 
     public void DeactivateAndReleaseAll()

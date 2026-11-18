@@ -1,262 +1,367 @@
 <Window x:Class="LanKvm.App.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="LanKvm — 유선 PC · 와이파이 노트북 KVM"
-        Width="780" Height="820" MinWidth="700" MinHeight="720"
+        Title="LanKvm"
+        Width="450" Height="515" MinWidth="430" MinHeight="470"
         Background="#0F172A" Foreground="#E2E8F0"
         WindowStartupLocation="CenterScreen"
         Closing="Window_Closing">
-    <Grid Margin="16">
+    <Grid Margin="14">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
-        <!-- Header -->
-        <Border Grid.Row="0" Background="#1E293B" CornerRadius="10" Padding="16,12" Margin="0,0,0,10" BorderBrush="#334155" BorderThickness="1">
-            <DockPanel LastChildFill="False">
-                <StackPanel DockPanel.Dock="Left">
-                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <TextBlock x:Name="AppTitleText" Text="LanKvm" FontSize="20" FontWeight="Bold" Foreground="#F8FAFC"/>
-                        <Border x:Name="StatusBadge" Background="#334155" CornerRadius="12" Padding="10,3" Margin="12,0,0,0" VerticalAlignment="Center">
-                            <TextBlock x:Name="StatusBadgeText" Text="대기 중" FontSize="12" FontWeight="SemiBold" Foreground="#E2E8F0"/>
-                        </Border>
-                        <Border x:Name="AdminBadge" Background="#1E3A5F" CornerRadius="12" Padding="9,3" Margin="8,0,0,0" VerticalAlignment="Center">
-                            <TextBlock x:Name="AdminBadgeText" Text="일반 권한" FontSize="11" Foreground="#93C5FD"/>
-                        </Border>
-                    </StackPanel>
-                    <TextBlock x:Name="StatusDetailText" Text="역할을 선택하고 시작 버튼을 누르세요." FontSize="12" Foreground="#94A3B8" Margin="0,4,0,0"/>
-                </StackPanel>
-
-                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button x:Name="ElevateButton" Content="관리자 권한 재시작" Click="ElevateButton_Click" Margin="0" ToolTip="작업 관리자·관리자 창 위에서도 동작하려면 관리자 권한이 필요합니다."/>
-                </StackPanel>
-            </DockPanel>
-        </Border>
-
-        <!-- Role Selector -->
-        <Border Grid.Row="1" Background="#1E293B" CornerRadius="10" Padding="14,10" Margin="0,0,0,10" BorderBrush="#334155" BorderThickness="1">
+        <!-- Compact Header -->
+        <Border Grid.Row="0" Background="#1E293B" CornerRadius="10" Padding="14,10" Margin="0,0,0,10" BorderBrush="#334155" BorderThickness="1">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="12"/>
-                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <RadioButton x:Name="HostRoleRadio" Grid.Column="0" GroupName="RoleGroup" IsChecked="True"
-                             Checked="RoleRadio_Changed" Foreground="#F1F5F9" FontSize="13.5" FontWeight="SemiBold" VerticalContentAlignment="Center">
-                    <StackPanel Margin="4,0,0,0">
-                        <TextBlock Text="데스크탑 (Host · 서버)"/>
-                        <TextBlock Text="물리 마우스/키보드가 연결된 PC" FontSize="11" Foreground="#94A3B8"/>
+
+                <StackPanel Grid.Column="0" Margin="0,0,10,0">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock x:Name="AppTitleText" Text="LanKvm" FontSize="17" FontWeight="Bold" Foreground="#F8FAFC"/>
+                        <TextBlock x:Name="VersionText" Text="v1.3.0" FontSize="11" Foreground="#64748B" VerticalAlignment="Bottom" Margin="6,0,0,2"/>
+                        <Border x:Name="StatusBadge" Background="#334155" CornerRadius="10" Padding="8,2" Margin="8,0,0,0" VerticalAlignment="Center">
+                            <TextBlock x:Name="StatusBadgeText" Text="대기 중" FontSize="11" FontWeight="SemiBold" Foreground="#E2E8F0"/>
+                        </Border>
                     </StackPanel>
-                </RadioButton>
-                <RadioButton x:Name="ClientRoleRadio" Grid.Column="2" GroupName="RoleGroup"
-                             Checked="RoleRadio_Changed" Foreground="#F1F5F9" FontSize="13.5" FontWeight="SemiBold" VerticalContentAlignment="Center">
-                    <StackPanel Margin="4,0,0,0">
-                        <TextBlock Text="노트북 (Client · 와이파이)"/>
-                        <TextBlock Text="Host IP로 먼저 접속하는 노트북" FontSize="11" Foreground="#94A3B8"/>
-                    </StackPanel>
-                </RadioButton>
+                    <TextBlock x:Name="StatusDetailText" Text="연결을 시작하거나 설정을 확인하세요." FontSize="11.5" Foreground="#94A3B8"
+                               Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/>
+                </StackPanel>
+
+                <Button x:Name="SettingsToggleButton" Grid.Column="1" Content="⚙ 설정" Style="{StaticResource GhostButtonStyle}"
+                        Click="SettingsToggle_Click" VerticalAlignment="Center" Padding="10,6"/>
             </Grid>
         </Border>
 
-        <!-- Host Panel -->
-        <Border x:Name="HostPanel" Grid.Row="2" Background="#1E293B" CornerRadius="10" Padding="14" Margin="0,0,0,10" BorderBrush="#334155" BorderThickness="1">
-            <StackPanel>
-                <Grid Margin="0,0,0,8">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="135"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="내 IPv4 주소" VerticalAlignment="Center" Foreground="#CBD5E1"/>
-                    <TextBox x:Name="LocalIpTextBox" Grid.Column="1" IsReadOnly="True" Margin="0,0,8,0"/>
-                    <Button Grid.Column="2" Content="IP 복사" Click="CopyPrimaryIp_Click" Margin="0"/>
-                </Grid>
+        <!-- View 1: Minimal Pairing Main Screen -->
+        <Grid x:Name="MainPairingView" Grid.Row="1">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
 
-                <Grid Margin="0,0,0,8">
+            <!-- Sliding Pill Role Toggle -->
+            <Border x:Name="RolePillContainer" Grid.Row="0" Background="#0B1220" CornerRadius="22" Padding="4"
+                    BorderBrush="#334155" BorderThickness="1" Height="44" Margin="0,0,0,6">
+                <Grid x:Name="RolePillTrack" SizeChanged="RolePillTrack_SizeChanged">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="135"/>
-                        <ColumnDefinition Width="95"/>
-                        <ColumnDefinition Width="18"/>
-                        <ColumnDefinition Width="80"/>
-                        <ColumnDefinition Width="95"/>
+                        <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="TCP / UDP 포트" VerticalAlignment="Center" Foreground="#CBD5E1"/>
-                    <TextBox x:Name="HostTcpPortBox" Grid.Column="1" Text="24800"/>
-                    <TextBlock Grid.Column="3" Text="UDP 포트" VerticalAlignment="Center" Foreground="#CBD5E1"/>
-                    <TextBox x:Name="HostUdpPortBox" Grid.Column="4" Text="24801"/>
-                </Grid>
 
-                <Grid Margin="0,0,0,10">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="135"/>
-                        <ColumnDefinition Width="160"/>
-                        <ColumnDefinition Width="18"/>
-                        <ColumnDefinition Width="105"/>
-                        <ColumnDefinition Width="95"/>
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="노트북 배치 방향" VerticalAlignment="Center" Foreground="#CBD5E1"/>
-                    <ComboBox x:Name="EdgeCombo" Grid.Column="1" SelectionChanged="HostSetting_Changed">
-                        <ComboBoxItem Content="오른쪽 (Right)" Tag="Right" IsSelected="True"/>
-                        <ComboBoxItem Content="왼쪽 (Left)" Tag="Left"/>
-                        <ComboBoxItem Content="위 (Top)" Tag="Top"/>
-                        <ComboBoxItem Content="아래 (Bottom)" Tag="Bottom"/>
-                    </ComboBox>
-                    <TextBlock Grid.Column="3" Text="경계 저항(px)" VerticalAlignment="Center" Foreground="#CBD5E1"/>
-                    <TextBox x:Name="ResistanceBox" Grid.Column="4" Text="16"/>
-                </Grid>
+                    <Border x:Name="RolePillThumb" Grid.Column="0" CornerRadius="18" Background="#0284C7">
+                        <Border.RenderTransform>
+                            <TranslateTransform x:Name="RolePillTransform" X="0"/>
+                        </Border.RenderTransform>
+                    </Border>
 
-                <!-- PIN & Paired Device Security -->
-                <Border Background="#0F172A" CornerRadius="8" Padding="14,10" Margin="0,0,0,10" BorderBrush="#334155" BorderThickness="1">
-                    <DockPanel>
-                        <StackPanel DockPanel.Dock="Left">
-                            <TextBlock x:Name="HostPairingStateLabel" Text="페어링 PIN 번호 (최초 1회만 노트북에 입력)" FontSize="11.5" Foreground="#94A3B8"/>
-                            <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
-                                <TextBlock x:Name="HostPinText" Text="------" FontSize="24" FontWeight="Bold" Foreground="#38BDF8" FontFamily="Consolas"/>
-                                <TextBlock x:Name="HostFingerprintText" Text="지문: -" FontSize="11" Foreground="#64748B" VerticalAlignment="Bottom" Margin="12,0,0,4" FontFamily="Consolas"/>
-                            </StackPanel>
-                        </StackPanel>
-                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-                            <Button x:Name="OpenPairingButton" Content="새 기기 페어링(3분)" Click="OpenPairing_Click" IsEnabled="False"/>
-                            <Button x:Name="ClearPairedButton" Content="등록 초기화" Click="ClearPairedClients_Click"/>
-                            <Button x:Name="FirewallButton" Content="사설망 방화벽" Click="FirewallButton_Click" Margin="0"/>
-                        </StackPanel>
-                    </DockPanel>
+                    <Button x:Name="DesktopRoleBtn" Grid.Column="0" Style="{StaticResource PillSegmentButtonStyle}" Click="DesktopRole_Click">
+                        <TextBlock x:Name="DesktopRoleText" Text="데스크탑 · 호스트" FontSize="13" FontWeight="SemiBold" Foreground="#FFFFFF"/>
+                    </Button>
+
+                    <Button x:Name="LaptopRoleBtn" Grid.Column="1" Style="{StaticResource PillSegmentButtonStyle}" Click="LaptopRole_Click">
+                        <TextBlock x:Name="LaptopRoleText" Text="노트북 · 클라이언트" FontSize="13" FontWeight="SemiBold" Foreground="#94A3B8"/>
+                    </Button>
+                </Grid>
+            </Border>
+
+            <TextBlock x:Name="RoleSubtitleText" Grid.Row="1" Text="내 마우스·키보드로 옆 노트북을 함께 제어합니다"
+                       FontSize="11.5" Foreground="#94A3B8" HorizontalAlignment="Center" Margin="0,0,0,10"/>
+
+            <!-- Host Pairing Panel -->
+            <StackPanel x:Name="HostPanel" Grid.Row="2">
+                <!-- Local IP Card -->
+                <Border Background="#1E293B" CornerRadius="10" Padding="14,11" Margin="0,0,0,10" BorderBrush="#334155" BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock Text="내 데스크탑 IP (노트북에 입력)" FontSize="11.5" Foreground="#94A3B8" Margin="0,0,0,6"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="LocalIpTextBox" Grid.Column="0" IsReadOnly="True" FontFamily="Consolas" FontSize="14" FontWeight="SemiBold" Margin="0,0,8,0"/>
+                            <Button Grid.Column="1" Content="IP 복사" Click="CopyPrimaryIp_Click" Padding="12,6"/>
+                        </Grid>
+                    </StackPanel>
                 </Border>
 
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-                    <Button x:Name="HostStartButton" Grid.Column="0" Content="Host 시작" Background="#0284C7" BorderBrush="#0EA5E9" Click="HostStart_Click"/>
-                    <Button x:Name="HostStopButton" Grid.Column="1" Content="Host 중지" Click="HostStop_Click" IsEnabled="False"/>
-                    <Button x:Name="ForceLocalButton" Grid.Column="2" Content="로컬 제어 복구" Click="ForceLocal_Click" IsEnabled="False"/>
-                    <TextBlock x:Name="HostMetricsText" Grid.Column="3" Text="채널: - | RTT: -" HorizontalAlignment="Right" VerticalAlignment="Center" Foreground="#94A3B8" FontSize="12"/>
-                </Grid>
-            </StackPanel>
-        </Border>
-
-        <!-- Client Panel -->
-        <Border x:Name="ClientPanel" Grid.Row="2" Visibility="Collapsed" Background="#1E293B" CornerRadius="10" Padding="14" Margin="0,0,0,10" BorderBrush="#334155" BorderThickness="1">
-            <StackPanel>
-                <Grid Margin="0,0,0,8">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="135"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="데스크탑(Host) IP" VerticalAlignment="Center" Foreground="#CBD5E1"/>
-                    <TextBox x:Name="ClientHostIpBox" Grid.Column="1" Text="" TextChanged="ClientEndpoint_Changed" Margin="0,0,8,0"
-                             ToolTip="Host 화면의 '내 IPv4 주소'를 입력하세요 (예: 192.168.0.10)"/>
-                    <Button x:Name="DiagnoseButton" Grid.Column="2" Content="연결 테스트" Click="DiagnoseConnection_Click" Margin="0"/>
-                </Grid>
-
-                <Grid Margin="0,0,0,8">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="135"/>
-                        <ColumnDefinition Width="95"/>
-                        <ColumnDefinition Width="18"/>
-                        <ColumnDefinition Width="80"/>
-                        <ColumnDefinition Width="95"/>
-                        <ColumnDefinition Width="18"/>
-                        <ColumnDefinition Width="115"/>
-                        <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="TCP 포트" VerticalAlignment="Center" Foreground="#CBD5E1"/>
-                    <TextBox x:Name="ClientTcpPortBox" Grid.Column="1" Text="24800" TextChanged="ClientEndpoint_Changed"/>
-                    <TextBlock Grid.Column="3" Text="UDP 포트" VerticalAlignment="Center" Foreground="#CBD5E1"/>
-                    <TextBox x:Name="ClientUdpPortBox" Grid.Column="4" Text="24801"/>
-                    <TextBlock Grid.Column="6" Text="최초 1회 PIN" VerticalAlignment="Center" Foreground="#CBD5E1"/>
-                    <TextBox x:Name="ClientPinBox" Grid.Column="7" MaxLength="6" FontFamily="Consolas"/>
-                </Grid>
-
-                <Grid Margin="0,0,0,8">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="135"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="52"/>
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="마우스 감도 배율" VerticalAlignment="Center" Foreground="#CBD5E1"/>
-                    <Slider x:Name="SensitivitySlider" Grid.Column="1" Minimum="0.3" Maximum="2.5" Value="1.0"
-                            TickFrequency="0.1" IsSnapToTickEnabled="True" ValueChanged="SensitivitySlider_ValueChanged" VerticalAlignment="Center"/>
-                    <TextBlock x:Name="SensitivityLabel" Grid.Column="2" Text="1.0x" HorizontalAlignment="Right" VerticalAlignment="Center" Foreground="#38BDF8" FontWeight="SemiBold"/>
-                </Grid>
-
-                <DockPanel Margin="0,0,0,10">
-                    <TextBlock x:Name="ClientPairingStatusText" DockPanel.Dock="Left" Text="페어링 상태: 최초 1회 PIN 입력 필요" VerticalAlignment="Center" Foreground="#FBBF24" FontSize="12"/>
-                    <CheckBox x:Name="AutoSyncHostCheck" DockPanel.Dock="Right" Content="Host 연결 시 자동 버전 업데이트" IsChecked="True"
-                              Foreground="#CBD5E1" Checked="OptionCheck_Changed" Unchecked="OptionCheck_Changed"/>
-                </DockPanel>
-
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-                    <Button x:Name="ClientConnectButton" Grid.Column="0" Content="Host에 연결" Background="#0284C7" BorderBrush="#0EA5E9" Click="ClientConnect_Click"/>
-                    <Button x:Name="ClientDisconnectButton" Grid.Column="1" Content="연결 끊기" Click="ClientDisconnect_Click" IsEnabled="False"/>
-                    <Button x:Name="ResetTrustButton" Grid.Column="2" Content="페어링 해제" Click="ResetTrust_Click"/>
-                    <TextBlock x:Name="ClientMetricsText" Grid.Column="3" Text="모션 채널: -" HorizontalAlignment="Right" VerticalAlignment="Center" Foreground="#94A3B8" FontSize="12"/>
-                </Grid>
-            </StackPanel>
-        </Border>
-
-        <!-- Automation & Security Options -->
-        <Border Grid.Row="3" Background="#1E293B" CornerRadius="10" Padding="14,10" Margin="0,0,0,10" BorderBrush="#334155" BorderThickness="1">
-            <StackPanel>
-                <WrapPanel Margin="0,0,0,6">
-                    <CheckBox x:Name="AutoStartServiceCheck" Content="실행 시 자동 시작/연결" IsChecked="True"
-                              Foreground="#E2E8F0" Checked="OptionCheck_Changed" Unchecked="OptionCheck_Changed" Margin="0,0,16,4"/>
-                    <CheckBox x:Name="StartWithWindowsCheck" Content="Windows 시작 시 트레이 자동 실행"
-                              Foreground="#E2E8F0" Checked="StartWithWindows_Changed" Unchecked="StartWithWindows_Changed" Margin="0,0,16,4"/>
-                    <CheckBox x:Name="PrivateNetOnlyCheck" Content="사설망 IP만 허용 (외부 차단)" IsChecked="True"
-                              Foreground="#86EFAC" Checked="PrivateNetOnly_Changed" Unchecked="PrivateNetOnly_Changed" Margin="0,0,16,4"/>
-                </WrapPanel>
-                <DockPanel>
-                    <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center">
-                        <CheckBox x:Name="ClipboardCheck" Content="클립보드 공유 (텍스트·이미지)" IsChecked="True"
-                                  Foreground="#E2E8F0" Checked="ClipboardCheck_Changed" Unchecked="ClipboardCheck_Changed" Margin="0,0,16,0"/>
-                        <CheckBox x:Name="MinimizeToTrayCheck" Content="닫기 시 트레이로 최소화" IsChecked="True" Foreground="#E2E8F0"/>
+                <!-- PIN & Paired Devices Card -->
+                <Border Background="#1E293B" CornerRadius="10" Padding="14,12" Margin="0,0,0,12" BorderBrush="#334155" BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock x:Name="HostPairingStateLabel" Text="페어링 PIN 번호 (최초 1회만 노트북에 입력)" FontSize="11.5" Foreground="#94A3B8"/>
+                        <Grid Margin="0,4,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="HostPinText" Grid.Column="0" Text="------" FontSize="28" FontWeight="Bold"
+                                       Foreground="#38BDF8" FontFamily="Consolas" VerticalAlignment="Center"/>
+                            <Button x:Name="OpenPairingButton" Grid.Column="1" Content="새 기기 PIN" Click="OpenPairing_Click"
+                                    IsEnabled="False" VerticalAlignment="Center" ToolTip="3분간 새 노트북 페어링을 허용합니다."/>
+                        </Grid>
+                        <Border BorderBrush="#293548" BorderThickness="0,1,0,0" Padding="0,8,0,0">
+                            <DockPanel>
+                                <TextBlock x:Name="HostPairedSummaryText" DockPanel.Dock="Left" Text="등록 기기: 0대 · 지문 -"
+                                           FontSize="11" Foreground="#64748B" VerticalAlignment="Center" FontFamily="Consolas"/>
+                                <Button x:Name="ClearPairedButton" DockPanel.Dock="Right" Content="등록 초기화" Click="ClearPairedClients_Click"
+                                        Style="{StaticResource GhostButtonStyle}" Padding="8,3" FontSize="11"/>
+                            </DockPanel>
+                        </Border>
                     </StackPanel>
-                    <TextBlock DockPanel.Dock="Right" Text="긴급 탈출: Ctrl + Alt + Esc" Foreground="#FBBF24" FontWeight="SemiBold" VerticalAlignment="Center"/>
-                </DockPanel>
+                </Border>
+
+                <!-- Host Actions -->
+                <Grid Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="8"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="8"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Button x:Name="HostStartButton" Grid.Column="0" Content="서버 시작" Style="{StaticResource PrimaryButtonStyle}" Click="HostStart_Click"/>
+                    <Button x:Name="HostStopButton" Grid.Column="2" Content="서버 중지" Click="HostStop_Click" IsEnabled="False"/>
+                    <Button x:Name="ForceLocalButton" Grid.Column="4" Content="제어 복구" Click="ForceLocal_Click" IsEnabled="False"
+                            ToolTip="마우스·키보드 제어를 즉시 데스크탑으로 되돌립니다."/>
+                </Grid>
+
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                    <TextBlock x:Name="HostMetricsText" Text="채널: - | RTT: -" Foreground="#94A3B8" FontSize="11.5"/>
+                    <Border x:Name="HostEdgeLockChip" Visibility="Collapsed" Background="#451A03" BorderBrush="#D97706" BorderThickness="1"
+                            CornerRadius="8" Padding="6,1" Margin="8,0,0,0">
+                        <TextBlock Text="경계 잠금 중" FontSize="10.5" Foreground="#FBBF24" FontWeight="SemiBold"/>
+                    </Border>
+                </StackPanel>
             </StackPanel>
-        </Border>
 
-        <!-- GitHub Update Bar -->
-        <Border Grid.Row="4" Background="#1E293B" CornerRadius="10" Padding="14,8" Margin="0,0,0,10" BorderBrush="#334155" BorderThickness="1">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="125"/>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0" Text="GitHub 업데이트" VerticalAlignment="Center" Foreground="#CBD5E1"/>
-                <TextBox x:Name="GitHubRepoBox" Grid.Column="1" Margin="0,0,8,0" ToolTip="예: yourname/LanKvm (릴리즈에 LanKvm.exe 업로드 시 자동 업데이트)"/>
-                <CheckBox x:Name="CheckGitHubOnStartCheck" Grid.Column="2" Content="시작 시 확인" VerticalAlignment="Center"
-                          Foreground="#CBD5E1" Checked="OptionCheck_Changed" Unchecked="OptionCheck_Changed" Margin="0,0,10,0"/>
-                <Button x:Name="CheckGitHubButton" Grid.Column="3" Content="업데이트 확인" Click="CheckGitHubUpdate_Click" Margin="0"/>
-            </Grid>
-        </Border>
+            <!-- Client Pairing Panel -->
+            <StackPanel x:Name="ClientPanel" Grid.Row="2" Visibility="Collapsed">
+                <!-- Host Address Card -->
+                <Border Background="#1E293B" CornerRadius="10" Padding="14,11" Margin="0,0,0,10" BorderBrush="#334155" BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock Text="데스크탑(Host) IP 주소" FontSize="11.5" Foreground="#94A3B8" Margin="0,0,0,6"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="ClientHostIpBox" Grid.Column="0" Text="" FontFamily="Consolas" FontSize="14"
+                                     TextChanged="ClientEndpoint_Changed" Margin="0,0,8,0"
+                                     ToolTip="데스크탑 화면에 표시된 IPv4 주소를 입력하세요 (예: 192.168.55.193)"/>
+                            <Button x:Name="DiagnoseButton" Grid.Column="1" Content="연결 확인" Click="DiagnoseConnection_Click" Padding="11,6"/>
+                        </Grid>
+                    </StackPanel>
+                </Border>
 
-        <!-- Activity Log -->
-        <Border Grid.Row="5" Background="#1E293B" CornerRadius="10" Padding="12" BorderBrush="#334155" BorderThickness="1">
-            <DockPanel>
-                <TextBlock DockPanel.Dock="Top" Text="실행 로그" FontSize="12" FontWeight="SemiBold" Foreground="#94A3B8" Margin="0,0,0,6"/>
-                <TextBox x:Name="LogTextBox" IsReadOnly="True" VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"
-                         Background="#0B1220" BorderThickness="0" FontFamily="Consolas" FontSize="11.5" Foreground="#CBD5E1"/>
+                <!-- PIN / Paired State Card -->
+                <Border Background="#1E293B" CornerRadius="10" Padding="14,12" Margin="0,0,0,12" BorderBrush="#334155" BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock x:Name="ClientPairingStatusText" Text="최초 1회 PIN 입력 필요 (이후 자동 연결)"
+                                   FontSize="11.5" Foreground="#FBBF24" Margin="0,0,0,8"/>
+
+                        <StackPanel x:Name="ClientPinEntryPanel">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="6자리 PIN" VerticalAlignment="Center" Foreground="#CBD5E1" Margin="0,0,12,0" FontSize="12.5"/>
+                                <TextBox x:Name="ClientPinBox" Grid.Column="1" MaxLength="6" FontFamily="Consolas" FontSize="20"
+                                         FontWeight="Bold" TextAlignment="Center" Padding="8,5"/>
+                            </Grid>
+                        </StackPanel>
+
+                        <DockPanel x:Name="ClientPairedReadyPanel" Visibility="Collapsed">
+                            <TextBlock DockPanel.Dock="Left" Text="신뢰 기기 인증 저장됨" Foreground="#86EFAC" FontSize="12.5" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                            <Button x:Name="ResetTrustButton" DockPanel.Dock="Right" Content="재페어링(초기화)" Click="ResetTrust_Click"
+                                    Style="{StaticResource GhostButtonStyle}" Padding="8,4" FontSize="11"/>
+                        </DockPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Client Actions -->
+                <Grid Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="8"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Button x:Name="ClientConnectButton" Grid.Column="0" Content="연결" Style="{StaticResource PrimaryButtonStyle}" Click="ClientConnect_Click"/>
+                    <Button x:Name="ClientDisconnectButton" Grid.Column="2" Content="연결 끊기" Click="ClientDisconnect_Click" IsEnabled="False"/>
+                </Grid>
+
+                <TextBlock x:Name="ClientMetricsText" Text="모션 채널: -" HorizontalAlignment="Center" Foreground="#94A3B8" FontSize="11.5"/>
+            </StackPanel>
+
+            <!-- Compact Footer -->
+            <DockPanel Grid.Row="3" Margin="2,4,2,0">
+                <TextBlock DockPanel.Dock="Left" Text="긴급 탈출: Ctrl + Alt + Esc" FontSize="11" Foreground="#FBBF24" FontWeight="SemiBold"/>
+                <TextBlock x:Name="MainFooterHintText" DockPanel.Dock="Right" Text="상세 옵션은 우측 상단 ⚙ 설정" FontSize="11" Foreground="#64748B" HorizontalAlignment="Right"/>
             </DockPanel>
-        </Border>
+        </Grid>
+
+        <!-- View 2: Full Settings & Logs -->
+        <ScrollViewer x:Name="SettingsView" Grid.Row="1" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" Padding="0,0,4,0">
+            <StackPanel>
+                <!-- Screen Switch & Hotkey -->
+                <Border Background="#1E293B" CornerRadius="10" Padding="13" Margin="0,0,0,10" BorderBrush="#334155" BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock Text="화면 전환 · 단축키 (데스크탑)" FontSize="12.5" FontWeight="Bold" Foreground="#38BDF8" Margin="0,0,0,8"/>
+
+                        <Grid Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="105"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="노트북 방향" VerticalAlignment="Center" Foreground="#CBD5E1" FontSize="12"/>
+                            <ComboBox x:Name="EdgeCombo" Grid.Column="1" SelectionChanged="HostSetting_Changed">
+                                <ComboBoxItem Content="오른쪽 (Right)" Tag="Right" IsSelected="True"/>
+                                <ComboBoxItem Content="왼쪽 (Left)" Tag="Left"/>
+                                <ComboBoxItem Content="위 (Top)" Tag="Top"/>
+                                <ComboBoxItem Content="아래 (Bottom)" Tag="Bottom"/>
+                            </ComboBox>
+                        </Grid>
+
+                        <Grid Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="105"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="즉시 전환 키" VerticalAlignment="Center" Foreground="#CBD5E1" FontSize="12"/>
+                            <ComboBox x:Name="SwitchHotkeyCombo" Grid.Column="1" SelectionChanged="HostSetting_Changed">
+                                <ComboBoxItem Content="Ctrl + Alt + Space" Tag="CtrlAltSpace" IsSelected="True"/>
+                                <ComboBoxItem Content="ScrollLock" Tag="ScrollLock"/>
+                                <ComboBoxItem Content="Pause / Break" Tag="Pause"/>
+                                <ComboBoxItem Content="사용 안 함" Tag="None"/>
+                            </ComboBox>
+                        </Grid>
+
+                        <Grid Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="105"/>
+                                <ColumnDefinition Width="90"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="경계 저항(px)" VerticalAlignment="Center" Foreground="#CBD5E1" FontSize="12"/>
+                            <TextBox x:Name="ResistanceBox" Grid.Column="1" Text="16"/>
+                            <TextBlock Grid.Column="2" Text="(0 ~ 200)" VerticalAlignment="Center" Foreground="#64748B" FontSize="11" Margin="8,0,0,0"/>
+                        </Grid>
+
+                        <CheckBox x:Name="AutoLockFullscreenCheck" Content="게임·전체화면 실행 시 경계 전환 자동 잠금" IsChecked="True"
+                                  Foreground="#93C5FD" Checked="HostOptionCheck_Changed" Unchecked="HostOptionCheck_Changed" Margin="0,2,0,5"/>
+                        <CheckBox x:Name="LockScreenEdgeCheck" Content="경계 이동 수동 잠금 (단축키로만 전환)"
+                                  Foreground="#FBBF24" Checked="HostOptionCheck_Changed" Unchecked="HostOptionCheck_Changed"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Input & Sharing -->
+                <Border Background="#1E293B" CornerRadius="10" Padding="13" Margin="0,0,0,10" BorderBrush="#334155" BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock Text="입력 · 클립보드 · 자동 실행" FontSize="12.5" FontWeight="Bold" Foreground="#38BDF8" Margin="0,0,0,8"/>
+
+                        <Grid Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="105"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="42"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="노트북 감도" VerticalAlignment="Center" Foreground="#CBD5E1" FontSize="12"/>
+                            <Slider x:Name="SensitivitySlider" Grid.Column="1" Minimum="0.3" Maximum="2.5" Value="1.0"
+                                    TickFrequency="0.1" IsSnapToTickEnabled="True" ValueChanged="SensitivitySlider_ValueChanged" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="SensitivityLabel" Grid.Column="2" Text="1.0x" HorizontalAlignment="Right" VerticalAlignment="Center" Foreground="#38BDF8" FontWeight="SemiBold"/>
+                        </Grid>
+
+                        <CheckBox x:Name="ClipboardCheck" Content="클립보드 · Ctrl+C/V 파일 양방향 공유" IsChecked="True"
+                                  Foreground="#E2E8F0" Checked="ClipboardCheck_Changed" Unchecked="ClipboardCheck_Changed" Margin="0,0,0,5"/>
+                        <CheckBox x:Name="AutoSyncHostCheck" Content="Host 연결 시 자동 버전 업데이트" IsChecked="True"
+                                  Foreground="#E2E8F0" Checked="OptionCheck_Changed" Unchecked="OptionCheck_Changed" Margin="0,0,0,5"/>
+                        <CheckBox x:Name="AutoStartServiceCheck" Content="앱 실행 시 자동 시작 / 자동 연결" IsChecked="True"
+                                  Foreground="#E2E8F0" Checked="OptionCheck_Changed" Unchecked="OptionCheck_Changed" Margin="0,0,0,5"/>
+                        <CheckBox x:Name="StartWithWindowsCheck" Content="Windows 시작 시 트레이로 자동 실행"
+                                  Foreground="#E2E8F0" Checked="StartWithWindows_Changed" Unchecked="StartWithWindows_Changed" Margin="0,0,0,5"/>
+                        <CheckBox x:Name="MinimizeToTrayCheck" Content="창 닫기(X) 시 트레이로 최소화" IsChecked="True"
+                                  Foreground="#E2E8F0"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Network, Firewall & Privilege -->
+                <Border Background="#1E293B" CornerRadius="10" Padding="13" Margin="0,0,0,10" BorderBrush="#334155" BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock Text="네트워크 · 방화벽 · 보안 권한" FontSize="12.5" FontWeight="Bold" Foreground="#38BDF8" Margin="0,0,0,8"/>
+
+                        <Grid Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="65"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="12"/>
+                                <ColumnDefinition Width="65"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="TCP 포트" VerticalAlignment="Center" Foreground="#CBD5E1" FontSize="12"/>
+                            <TextBox x:Name="TcpPortBox" Grid.Column="1" Text="24800" TextChanged="PortBox_Changed"/>
+                            <TextBlock Grid.Column="3" Text="UDP 포트" VerticalAlignment="Center" Foreground="#CBD5E1" FontSize="12"/>
+                            <TextBox x:Name="UdpPortBox" Grid.Column="4" Text="24801"/>
+                        </Grid>
+
+                        <CheckBox x:Name="PrivateNetOnlyCheck" Content="사설망 IP만 허용 (외부 인터넷 IP 차단)" IsChecked="True"
+                                  Foreground="#86EFAC" Checked="PrivateNetOnly_Changed" Unchecked="PrivateNetOnly_Changed" Margin="0,0,0,4"/>
+                        <TextBlock Text="※ 사설망 허용은 LanKvm 앱 내부 IP 검사이며, 방화벽 허용 시에도 LanKvm.exe의 위 포트만 사설 대역에 열립니다."
+                                   FontSize="10.5" Foreground="#64748B" TextWrapping="Wrap" Margin="0,0,0,8"/>
+
+                        <Grid Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="8"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Button x:Name="FirewallButton" Grid.Column="0" Content="사설망 방화벽 허용" Click="FirewallButton_Click" Padding="8,6"/>
+                            <Button x:Name="RemoveFirewallButton" Grid.Column="2" Content="방화벽 규칙 제거" Click="RemoveFirewallButton_Click"
+                                    Style="{StaticResource GhostButtonStyle}" Padding="8,6"/>
+                        </Grid>
+
+                        <DockPanel>
+                            <Border x:Name="AdminBadge" DockPanel.Dock="Left" Background="#1E3A5F" CornerRadius="8" Padding="9,4" VerticalAlignment="Center">
+                                <TextBlock x:Name="AdminBadgeText" Text="권한: 일반 권한" FontSize="11.5" Foreground="#93C5FD"/>
+                            </Border>
+                            <Button x:Name="ElevateButton" DockPanel.Dock="Right" Content="관리자 권한 재시작" Click="ElevateButton_Click"
+                                    Padding="10,5" FontSize="11.5" ToolTip="작업 관리자·관리자 창 위에서도 동작하려면 관리자 권한이 필요합니다."/>
+                        </DockPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- GitHub Updates -->
+                <Border Background="#1E293B" CornerRadius="10" Padding="13" Margin="0,0,0,10" BorderBrush="#334155" BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock Text="GitHub 업데이트" FontSize="12.5" FontWeight="Bold" Foreground="#38BDF8" Margin="0,0,0,8"/>
+                        <Grid Margin="0,0,0,6">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="8"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="GitHubRepoBox" Grid.Column="0" ToolTip="예: bugea0002/LanKvm"/>
+                            <Button x:Name="CheckGitHubButton" Grid.Column="2" Content="업데이트 확인" Click="CheckGitHubUpdate_Click" Padding="10,6"/>
+                        </Grid>
+                        <CheckBox x:Name="CheckGitHubOnStartCheck" Content="프로그램 시작 시 업데이트 자동 확인"
+                                  Foreground="#CBD5E1" Checked="OptionCheck_Changed" Unchecked="OptionCheck_Changed"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Activity Log -->
+                <Border Background="#1E293B" CornerRadius="10" Padding="13" BorderBrush="#334155" BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock Text="실행 로그" FontSize="12.5" FontWeight="Bold" Foreground="#38BDF8" Margin="0,0,0,6"/>
+                        <TextBox x:Name="LogTextBox" Height="130" IsReadOnly="True" VerticalScrollBarVisibility="Auto" TextWrapping="Wrap"
+                                 VerticalContentAlignment="Top" Background="#0B1220" FontFamily="Consolas" FontSize="11" Foreground="#CBD5E1"/>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
     </Grid>
 </Window>

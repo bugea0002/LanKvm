@@ -51,6 +51,9 @@ public sealed class KvmClientSession : IDisposable
     private CancellationTokenSource? _activeAttemptCts;
 
     private FramedControlTransport? _transport;
+    private PreparedFileTransfer? _pendingOutgoingTransfer;
+    private FileOfferPayload? _pendingIncomingOffer;
+    private IncomingFileTransfer? _incomingTransfer;
     private FileStream? _updateStream;
     private string? _updateStagingPath;
     private string? _expectedUpdateSha256;
@@ -448,8 +451,9 @@ public sealed class KvmClientSession : IDisposable
                     var sw = PacketCodec.DecodeSwitchScreen(frame.Payload);
                     if (sw.ToClient)
                     {
-                        _injector.ActivateFromHost(sw.EntryEdge, sw.Ratio);
+                        _injector.ActivateFromHost(sw.EntryEdge, sw.Ratio, sw.IsHotkeyToggle);
                         PublishStatus($"{_hostName}에서 마우스/키보드 제어 중");
+                        await TryRequestPendingIncomingFileAsync(transport, ct).ConfigureAwait(false);
                     }
                     else
                     {
@@ -484,16 +488,87 @@ public sealed class KvmClientSession : IDisposable
                 case MessageType.ClipboardText:
                     if (_clipboard.Enabled && frame.Payload.Length <= ClipboardSyncService.MaxTextBytes)
                     {
-                        _clipboard.ApplyRemoteClipboard(new ClipboardPayload(false, frame.Payload));
+                        _clipboard.ApplyRemoteClipboard(new ClipboardPayload(ClipboardContentKind.Text, frame.Payload));
                     }
                     break;
 
                 case MessageType.ClipboardImage:
                     if (_clipboard.Enabled && frame.Payload.Length <= ClipboardSyncService.MaxImageBytes)
                     {
-                        _clipboard.ApplyRemoteClipboard(new ClipboardPayload(true, frame.Payload));
+                        _clipboard.ApplyRemoteClipboard(new ClipboardPayload(ClipboardContentKind.Image, frame.Payload));
                     }
                     break;
+
+                case MessageType.FileOffer:
+                    if (_clipboard.Enabled)
+                    {
+                        _pendingIncomingOffer = PacketCodec.DecodeFileOffer(frame.Payload);
+                        if (_injector.IsControlledByHost)
+                        {
+                            await TryRequestPendingIncomingFileAsync(transport, ct).ConfigureAwait(false);
+                        }
+                    }
+                    break;
+
+                case MessageType.FileTransferRequest:
+                {
+                    var req = PacketCodec.DecodeFileTransferRequest(frame.Payload);
+                    PreparedFileTransfer? prepared = _pendingOutgoingTransfer;
+                    if (prepared is not null && prepared.Offer.TransferId == req.TransferId)
+                    {
+                        _pendingOutgoingTransfer = null;
+                        _ = Task.Run(() => StreamOutgoingFilesAsync(transport, prepared, ct), ct);
+                    }
+                    break;
+                }
+
+                case MessageType.FileTransferChunk:
+                {
+                    var chunk = PacketCodec.DecodeFileTransferChunk(frame.Payload);
+                    try
+                    {
+                        _incomingTransfer?.WriteChunk(chunk);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"파일 수신 오류: {ex.Message}");
+                        _incomingTransfer?.CleanupOnFailure();
+                        _incomingTransfer = null;
+                    }
+                    break;
+                }
+
+                case MessageType.FileTransferComplete:
+                {
+                    var complete = PacketCodec.DecodeFileTransferComplete(frame.Payload);
+                    if (_incomingTransfer is not null)
+                    {
+                        try
+                        {
+                            IReadOnlyList<string> topPaths = _incomingTransfer.FinalizeAndVerify(complete);
+                            _incomingTransfer.Dispose();
+                            _incomingTransfer = null;
+                            _clipboard.ApplyRemoteClipboard(new ClipboardPayload(ClipboardContentKind.FileDrop, Array.Empty<byte>(), topPaths));
+                            Log($"파일 {complete.FileSha256HexList.Count}개 수신 완료 — Ctrl+V로 붙여넣으세요!");
+                        }
+                        catch (Exception ex)
+                        {
+                            Log($"파일 검증 실패: {ex.Message}");
+                            _incomingTransfer?.CleanupOnFailure();
+                            _incomingTransfer = null;
+                        }
+                    }
+                    break;
+                }
+
+                case MessageType.FileTransferError:
+                {
+                    string err = Encoding.UTF8.GetString(frame.Payload);
+                    Log($"파일 전송 실패: {err}");
+                    _incomingTransfer?.CleanupOnFailure();
+                    _incomingTransfer = null;
+                    break;
+                }
 
                 case MessageType.Heartbeat:
                     await transport.SendAsync(MessageType.HeartbeatAck, frame.Payload, ct).ConfigureAwait(false);
@@ -568,6 +643,11 @@ public sealed class KvmClientSession : IDisposable
     {
         try
         {
+            _incomingTransfer?.CleanupOnFailure();
+            _incomingTransfer = null;
+            _pendingIncomingOffer = null;
+            _pendingOutgoingTransfer = null;
+
             _updateStream?.Dispose();
             _updateStream = null;
             if (!_keepUpdateStagingFile &&
@@ -608,6 +688,22 @@ public sealed class KvmClientSession : IDisposable
 
         try
         {
+            if (payload.Kind == ClipboardContentKind.FileDrop && payload.FilePaths is { Count: > 0 })
+            {
+                if (!FileTransferService.TryBuildTransfer(payload.FilePaths, out PreparedFileTransfer? prepared, out string? err) || prepared is null)
+                {
+                    if (!string.IsNullOrEmpty(err)) Log($"파일 공유 제외: {err}");
+                    return;
+                }
+                _pendingOutgoingTransfer = prepared;
+                await t.SendAsync(
+                    MessageType.FileOffer,
+                    PacketCodec.EncodeFileOffer(prepared.Offer),
+                    _cts.Token).ConfigureAwait(false);
+                Log($"파일 {prepared.Offer.Files.Count}개 공유 대기 중 (데스크탑 복귀 시 자동 전송)");
+                return;
+            }
+
             await t.SendAsync(
                 payload.IsImage ? MessageType.ClipboardImage : MessageType.ClipboardText,
                 payload.Data,
@@ -616,6 +712,52 @@ public sealed class KvmClientSession : IDisposable
         catch
         {
             // Ignore
+        }
+    }
+
+    private async Task TryRequestPendingIncomingFileAsync(FramedControlTransport transport, CancellationToken ct)
+    {
+        FileOfferPayload? offer = _pendingIncomingOffer;
+        if (offer is null) return;
+        _pendingIncomingOffer = null;
+
+        try
+        {
+            _incomingTransfer?.CleanupOnFailure();
+            _incomingTransfer = new IncomingFileTransfer(offer.Value);
+            Log($"데스크탑 파일 {offer.Value.Files.Count}개 수신 중...");
+            await transport.SendAsync(
+                MessageType.FileTransferRequest,
+                PacketCodec.EncodeFileTransferRequest(offer.Value.TransferId),
+                ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log($"파일 수신 준비 실패: {ex.Message}");
+            _incomingTransfer?.CleanupOnFailure();
+            _incomingTransfer = null;
+        }
+    }
+
+    private async Task StreamOutgoingFilesAsync(FramedControlTransport transport, PreparedFileTransfer prepared, CancellationToken ct)
+    {
+        try
+        {
+            Log($"데스크탑으로 파일 {prepared.Offer.Files.Count}개 전송 시작...");
+            await FileTransferService.StreamTransferAsync(prepared, transport, ct).ConfigureAwait(false);
+            Log($"데스크탑으로 파일 {prepared.Offer.Files.Count}개 전송 완료");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Log($"파일 전송 오류: {ex.Message}");
+            try
+            {
+                await transport.SendAsync(
+                    MessageType.FileTransferError,
+                    Encoding.UTF8.GetBytes(ex.Message),
+                    ct).ConfigureAwait(false);
+            }
+            catch { }
         }
     }
 

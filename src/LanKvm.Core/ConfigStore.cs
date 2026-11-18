@@ -10,6 +10,14 @@ public enum AppRole
     Client = 1
 }
 
+public enum SwitchHotkeyMode
+{
+    CtrlAltSpace = 0,
+    ScrollLock = 1,
+    Pause = 2,
+    None = 3
+}
+
 public sealed record TrustedClientRecord(
     string ClientId,
     string ClientName,
@@ -30,6 +38,9 @@ public sealed class AppConfig
     public ScreenEdge SwitchEdge { get; set; } = ScreenEdge.Right;
     public double ClientSensitivity { get; set; } = 1.0;
     public int EdgeResistancePx { get; set; } = 16;
+    public SwitchHotkeyMode SwitchHotkey { get; set; } = SwitchHotkeyMode.CtrlAltSpace;
+    public bool AutoLockOnFullscreen { get; set; } = true;
+    public bool LockScreenEdge { get; set; } = false;
     public bool ClipboardSyncEnabled { get; set; } = true;
     public bool AutoReconnect { get; set; } = true;
     public bool AutoStartService { get; set; } = true;
