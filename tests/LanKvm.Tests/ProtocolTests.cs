@@ -117,11 +117,12 @@ public class ProtocolTests
     }
 
     [Fact]
-    public void MotionCoalescer_And_SubPixelAccumulator_PreserveExactDeltas()
+    public async Task MotionCoalescer_And_SubPixelAccumulator_PreserveExactDeltas()
     {
-        var coalescer = new MotionCoalescer();
+        using var coalescer = new MotionCoalescer();
         Parallel.For(0, 1000, _ => coalescer.AddDelta(2, -3));
 
+        await coalescer.WaitForDataAsync(CancellationToken.None);
         Assert.True(coalescer.TryDrain(out int dx, out int dy));
         Assert.Equal(2000, dx);
         Assert.Equal(-3000, dy);

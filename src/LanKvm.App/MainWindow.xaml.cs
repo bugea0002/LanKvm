@@ -19,13 +19,31 @@ public partial class MainWindow : Window
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool DestroyIcon(IntPtr hIcon);
 
+    private enum TrayDotState { Idle, Connecting, Connected, Remote }
+
+    private static readonly SolidColorBrush BrushSlate = CreateFrozenBrush(71, 85, 105);
+    private static readonly SolidColorBrush BrushIdle = CreateFrozenBrush(51, 65, 85);
+    private static readonly SolidColorBrush BrushAmber = CreateFrozenBrush(217, 119, 6);
+    private static readonly SolidColorBrush BrushGreen = CreateFrozenBrush(22, 163, 74);
+    private static readonly SolidColorBrush BrushBlue = CreateFrozenBrush(2, 132, 199);
+    private static readonly SolidColorBrush BrushTextBlue = CreateFrozenBrush(56, 189, 248);
+    private static readonly SolidColorBrush BrushTextGreen = CreateFrozenBrush(74, 222, 128);
+    private static readonly SolidColorBrush BrushTextAmber = CreateFrozenBrush(251, 191, 36);
+    private static readonly SolidColorBrush BrushAdminOk = CreateFrozenBrush(20, 83, 45);
+    private static readonly SolidColorBrush BrushAdminNormal = CreateFrozenBrush(30, 58, 95);
+
     private readonly AppConfig _config;
-    private readonly List<string> _logLines = new();
+    private readonly List<string> _logLines = new(80);
+    private readonly Dictionary<TrayDotState, System.Drawing.Icon> _trayIcons;
     private readonly WinForms.NotifyIcon _trayIcon;
-    private System.Drawing.Icon? _currentTrayIcon;
 
     private KvmHostSession? _hostSession;
     private KvmClientSession? _clientSession;
+    private HostStatusSnapshot? _lastHostSnap;
+    private ClientStatusSnapshot? _lastClientSnap;
+    private TrayDotState? _currentTrayState;
+    private string _lastTrayTooltip = string.Empty;
+    private bool _logDirty;
     private bool _allowExit;
     private bool _initialized;
 
@@ -36,8 +54,15 @@ public partial class MainWindow : Window
         _config = ConfigStore.Load();
         AppTitleText.Text = $"LanKvm v{AppUpdater.GetCurrentVersionString()}";
 
+        _trayIcons = new Dictionary<TrayDotState, System.Drawing.Icon>
+        {
+            [TrayDotState.Idle] = BuildTrayIcon(System.Drawing.Color.SlateGray),
+            [TrayDotState.Connecting] = BuildTrayIcon(System.Drawing.Color.Gold),
+            [TrayDotState.Connected] = BuildTrayIcon(System.Drawing.Color.LimeGreen),
+            [TrayDotState.Remote] = BuildTrayIcon(System.Drawing.Color.DeepSkyBlue)
+        };
         _trayIcon = CreateTrayIcon();
-        UpdateTrayColor(System.Drawing.Color.SlateGray);
+        SetTrayState(TrayDotState.Idle);
         _trayIcon.Visible = true;
 
         ApplyLoadedConfig();
@@ -65,6 +90,42 @@ public partial class MainWindow : Window
         {
             _ = CheckGitHubUpdateAsync(silentIfUpToDate: true);
         }
+
+        if (startMinimized)
+        {
+            NetworkHelper.TrimBackgroundMemory();
+        }
+    }
+
+    private static SolidColorBrush CreateFrozenBrush(byte r, byte g, byte b)
+    {
+        var brush = new SolidColorBrush(System.Windows.Media.Color.FromRgb(r, g, b));
+        brush.Freeze();
+        return brush;
+    }
+
+    private static System.Drawing.Icon BuildTrayIcon(System.Drawing.Color dotColor)
+    {
+        using var bmp = new Bitmap(16, 16);
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.Clear(System.Drawing.Color.Transparent);
+            using var bgBrush = new SolidBrush(System.Drawing.Color.FromArgb(30, 41, 59));
+            using var dotBrush = new SolidBrush(dotColor);
+            g.FillEllipse(bgBrush, 0, 0, 15, 15);
+            g.FillEllipse(dotBrush, 3, 3, 10, 10);
+        }
+
+        IntPtr hIcon = bmp.GetHicon();
+        try
+        {
+            using var temp = System.Drawing.Icon.FromHandle(hIcon);
+            return (System.Drawing.Icon)temp.Clone();
+        }
+        finally
+        {
+            DestroyIcon(hIcon);
+        }
     }
 
     private WinForms.NotifyIcon CreateTrayIcon()
@@ -85,32 +146,11 @@ public partial class MainWindow : Window
         return notify;
     }
 
-    private void UpdateTrayColor(System.Drawing.Color dotColor)
+    private void SetTrayState(TrayDotState state)
     {
-        using var bmp = new Bitmap(16, 16);
-        using (var g = Graphics.FromImage(bmp))
-        {
-            g.Clear(System.Drawing.Color.Transparent);
-            using var bgBrush = new SolidBrush(System.Drawing.Color.FromArgb(30, 41, 59));
-            using var dotBrush = new SolidBrush(dotColor);
-            g.FillEllipse(bgBrush, 0, 0, 15, 15);
-            g.FillEllipse(dotBrush, 3, 3, 10, 10);
-        }
-
-        IntPtr hIcon = bmp.GetHicon();
-        try
-        {
-            using var temp = System.Drawing.Icon.FromHandle(hIcon);
-            var cloned = (System.Drawing.Icon)temp.Clone();
-            var old = _currentTrayIcon;
-            _currentTrayIcon = cloned;
-            _trayIcon.Icon = cloned;
-            old?.Dispose();
-        }
-        finally
-        {
-            DestroyIcon(hIcon);
-        }
+        if (_currentTrayState == state) return;
+        _currentTrayState = state;
+        _trayIcon.Icon = _trayIcons[state];
     }
 
     private void ApplyLoadedConfig()
@@ -158,9 +198,7 @@ public partial class MainWindow : Window
 
         bool isAdmin = NetworkHelper.IsRunAsAdministrator();
         AdminBadgeText.Text = isAdmin ? "관리자 권한" : "일반 권한";
-        AdminBadge.Background = new SolidColorBrush(isAdmin
-            ? System.Windows.Media.Color.FromRgb(20, 83, 45)
-            : System.Windows.Media.Color.FromRgb(30, 58, 95));
+        AdminBadge.Background = isAdmin ? BrushAdminOk : BrushAdminNormal;
         ElevateButton.Visibility = isAdmin ? Visibility.Collapsed : Visibility.Visible;
     }
 
@@ -169,6 +207,15 @@ public partial class MainWindow : Window
         if (!_initialized) return;
         UpdateRolePanels();
         SaveCurrentConfig();
+
+        if (ClientRoleRadio.IsChecked == true &&
+            _config.AutoStartService &&
+            _clientSession is null &&
+            _hostSession is null &&
+            IsCurrentClientEndpointPaired())
+        {
+            StartClientCore();
+        }
     }
 
     private void UpdateRolePanels()
@@ -182,6 +229,14 @@ public partial class MainWindow : Window
     {
         if (!_initialized) return;
         RefreshClientPairingUi();
+        if (ClientRoleRadio.IsChecked == true &&
+            _config.AutoStartService &&
+            _clientSession is null &&
+            _hostSession is null &&
+            IsCurrentClientEndpointPaired())
+        {
+            StartClientCore();
+        }
     }
 
     private bool IsCurrentClientEndpointPaired()
@@ -197,14 +252,14 @@ public partial class MainWindow : Window
         if (paired)
         {
             ClientPairingStatusText.Text = "페어링 완료 — PIN 입력 없이 자동 연결됩니다";
-            ClientPairingStatusText.Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(74, 222, 128));
+            ClientPairingStatusText.Foreground = BrushTextGreen;
             ClientPinBox.Text = string.Empty;
             ClientPinBox.IsEnabled = false;
         }
         else
         {
             ClientPairingStatusText.Text = "최초 1회 PIN 입력 필요 (이후 자동 연결)";
-            ClientPairingStatusText.Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(251, 191, 36));
+            ClientPairingStatusText.Foreground = BrushTextAmber;
             ClientPinBox.IsEnabled = true;
         }
     }
@@ -599,19 +654,29 @@ public partial class MainWindow : Window
 
     private void ApplyHostStatus(HostStatusSnapshot snap)
     {
+        _lastHostSnap = snap;
+
+        TrayDotState trayState = snap.IsRemoteControlling
+            ? TrayDotState.Remote
+            : (snap.IsClientConnected ? TrayDotState.Connected : TrayDotState.Connecting);
+        SetTrayState(trayState);
+        SetTrayTooltip($"LanKvm Host — {snap.StatusMessage}");
+
+        if (!IsVisible) return;
+
         if (snap.IsPinPairingOpen)
         {
             HostPairingStateLabel.Text = snap.PairedDeviceCount == 0
                 ? "페어링 PIN 번호 (최초 1회만 노트북에 입력)"
                 : $"새 기기 페어링 창 열림 (등록 {snap.PairedDeviceCount}대)";
             HostPinText.Text = snap.Pin;
-            HostPinText.Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(56, 189, 248));
+            HostPinText.Foreground = BrushTextBlue;
         }
         else
         {
             HostPairingStateLabel.Text = $"보안 잠금됨 — 등록 기기 {snap.PairedDeviceCount}대 자동 인증 (새 기기 추가 시 우측 버튼)";
             HostPinText.Text = "잠금됨";
-            HostPinText.Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(74, 222, 128));
+            HostPinText.Foreground = BrushTextGreen;
         }
 
         HostFingerprintText.Text = $"지문: {snap.CertFingerprintShort}";
@@ -619,18 +684,15 @@ public partial class MainWindow : Window
 
         if (snap.IsRemoteControlling)
         {
-            SetStatusBadge("원격 제어 중", System.Windows.Media.Color.FromRgb(2, 132, 199));
-            UpdateTrayColor(System.Drawing.Color.DeepSkyBlue);
+            SetStatusBadge("원격 제어 중", BrushBlue);
         }
         else if (snap.IsClientConnected)
         {
-            SetStatusBadge("노트북 연결됨", System.Windows.Media.Color.FromRgb(22, 163, 74));
-            UpdateTrayColor(System.Drawing.Color.LimeGreen);
+            SetStatusBadge("노트북 연결됨", BrushGreen);
         }
         else
         {
-            SetStatusBadge("연결 대기 중", System.Windows.Media.Color.FromRgb(71, 85, 105));
-            UpdateTrayColor(System.Drawing.Color.Gold);
+            SetStatusBadge("연결 대기 중", BrushSlate);
         }
 
         string channel = snap.IsClientConnected
@@ -638,32 +700,41 @@ public partial class MainWindow : Window
             : "-";
         string rtt = snap.IsClientConnected ? $"{snap.RttMs}ms" : "-";
         HostMetricsText.Text = $"채널: {channel} | RTT: {rtt}";
-        SetTrayTooltip($"LanKvm Host — {snap.StatusMessage}");
     }
 
     private void ApplyClientStatus(ClientStatusSnapshot snap)
     {
+        _lastClientSnap = snap;
+
+        TrayDotState trayState = snap.IsControlledByHost
+            ? TrayDotState.Remote
+            : (snap.IsConnected ? TrayDotState.Connected : ((snap.IsConnecting || snap.IsAutoReconnecting) ? TrayDotState.Connecting : TrayDotState.Idle));
+        SetTrayState(trayState);
+        SetTrayTooltip($"LanKvm Client — {snap.StatusMessage}");
+
+        if (!IsVisible) return;
+
         StatusDetailText.Text = snap.StatusMessage;
 
         if (snap.IsControlledByHost)
         {
-            SetStatusBadge("원격 제어 수신 중", System.Windows.Media.Color.FromRgb(2, 132, 199));
-            UpdateTrayColor(System.Drawing.Color.DeepSkyBlue);
+            SetStatusBadge("원격 제어 수신 중", BrushBlue);
         }
         else if (snap.IsConnected)
         {
-            SetStatusBadge("Host 연결됨", System.Windows.Media.Color.FromRgb(22, 163, 74));
-            UpdateTrayColor(System.Drawing.Color.LimeGreen);
+            SetStatusBadge("Host 연결됨", BrushGreen);
         }
-        else if (snap.IsConnecting)
+        else if (snap.IsConnecting || snap.IsAutoReconnecting)
         {
-            SetStatusBadge("연결 중...", System.Windows.Media.Color.FromRgb(217, 119, 6));
-            UpdateTrayColor(System.Drawing.Color.Gold);
+            SetStatusBadge("자동 연결 대기 중", BrushAmber);
+            ClientConnectButton.IsEnabled = false;
+            ClientDisconnectButton.IsEnabled = true;
+            HostRoleRadio.IsEnabled = false;
+            ClientRoleRadio.IsEnabled = false;
         }
         else
         {
-            SetStatusBadge("연결 안 됨", System.Windows.Media.Color.FromRgb(71, 85, 105));
-            UpdateTrayColor(System.Drawing.Color.SlateGray);
+            SetStatusBadge("연결 안 됨", BrushSlate);
             ClientConnectButton.IsEnabled = true;
             ClientDisconnectButton.IsEnabled = false;
             HostRoleRadio.IsEnabled = true;
@@ -673,18 +744,22 @@ public partial class MainWindow : Window
         ClientMetricsText.Text = snap.IsConnected
             ? $"모션 채널: {(snap.IsUdpActive ? "UDP (AES-GCM)" : "TCP 폴백")}"
             : "모션 채널: -";
-        SetTrayTooltip($"LanKvm Client — {snap.StatusMessage}");
     }
 
     private void SetTrayTooltip(string text)
     {
-        _trayIcon.Text = text.Length <= 63 ? text : text[..63];
+        string truncated = text.Length <= 63 ? text : text[..63];
+        if (!string.Equals(_lastTrayTooltip, truncated, StringComparison.Ordinal))
+        {
+            _lastTrayTooltip = truncated;
+            _trayIcon.Text = truncated;
+        }
     }
 
-    private void SetStatusBadge(string text, System.Windows.Media.Color bgColor)
+    private void SetStatusBadge(string text, SolidColorBrush bgBrush)
     {
         StatusBadgeText.Text = text;
-        StatusBadge.Background = new SolidColorBrush(bgColor);
+        StatusBadge.Background = bgBrush;
     }
 
     private void StopAllSessions()
@@ -695,6 +770,9 @@ public partial class MainWindow : Window
         _clientSession?.Dispose();
         _clientSession = null;
 
+        _lastHostSnap = null;
+        _lastClientSnap = null;
+
         HostStartButton.IsEnabled = true;
         HostStopButton.IsEnabled = false;
         ForceLocalButton.IsEnabled = false;
@@ -704,25 +782,34 @@ public partial class MainWindow : Window
         HostRoleRadio.IsEnabled = true;
         ClientRoleRadio.IsEnabled = true;
 
-        SetStatusBadge("대기 중", System.Windows.Media.Color.FromRgb(51, 65, 85));
+        SetStatusBadge("대기 중", BrushIdle);
         StatusDetailText.Text = "역할을 선택하고 시작 버튼을 누르세요.";
         HostMetricsText.Text = "채널: - | RTT: -";
         ClientMetricsText.Text = "모션 채널: -";
         HostPinText.Text = "------";
         HostFingerprintText.Text = "지문: -";
-        UpdateTrayColor(System.Drawing.Color.SlateGray);
+        SetTrayState(TrayDotState.Idle);
         SetTrayTooltip("LanKvm — 대기 중");
     }
 
     private void AppendLog(string line)
     {
         _logLines.Add(line);
-        if (_logLines.Count > 120)
+        if (_logLines.Count > 80)
         {
             _logLines.RemoveAt(0);
         }
-        LogTextBox.Text = string.Join(Environment.NewLine, _logLines);
-        LogTextBox.ScrollToEnd();
+
+        if (IsVisible)
+        {
+            LogTextBox.Text = string.Join(Environment.NewLine, _logLines);
+            LogTextBox.ScrollToEnd();
+            _logDirty = false;
+        }
+        else
+        {
+            _logDirty = true;
+        }
     }
 
     private void SaveCurrentConfig()
@@ -780,6 +867,15 @@ public partial class MainWindow : Window
         Show();
         WindowState = WindowState.Normal;
         Activate();
+
+        if (_lastHostSnap is not null) ApplyHostStatus(_lastHostSnap);
+        if (_lastClientSnap is not null) ApplyClientStatus(_lastClientSnap);
+        if (_logDirty)
+        {
+            LogTextBox.Text = string.Join(Environment.NewLine, _logLines);
+            LogTextBox.ScrollToEnd();
+            _logDirty = false;
+        }
     }
 
     private void Window_Closing(object? sender, CancelEventArgs e)
@@ -788,6 +884,7 @@ public partial class MainWindow : Window
         {
             e.Cancel = true;
             Hide();
+            NetworkHelper.TrimBackgroundMemory();
             return;
         }
 
@@ -808,6 +905,10 @@ public partial class MainWindow : Window
         StopAllSessions();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();
-        _currentTrayIcon?.Dispose();
+        foreach (var icon in _trayIcons.Values)
+        {
+            icon.Dispose();
+        }
+        _trayIcons.Clear();
     }
 }

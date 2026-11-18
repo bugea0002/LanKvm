@@ -4,6 +4,7 @@ using System.Threading.Channels;
 using System.Windows.Forms;
 using LanKvm.Core.Native;
 using LanKvm.Protocol;
+using Microsoft.Win32;
 
 namespace LanKvm.Core.Input;
 
@@ -16,7 +17,7 @@ public sealed record CapturedSwitchToClientEvent(ScreenEdge HostEdge, float Rati
 /// <summary>
 /// Captures mouse deltas via Raw Input (WM_INPUT) and intercepts clicks/keys via
 /// low-level hooks on a dedicated high-priority STA Win32 message thread.
-/// Hook callbacks never perform blocking I/O.
+/// Hooks and Raw Input stay detached (0% CPU) until a client is connected.
 /// </summary>
 public sealed class HostInputEngine : IDisposable
 {
@@ -34,6 +35,7 @@ public sealed class HostInputEngine : IDisposable
     private CursorHiderOverlay? _overlay;
     private IntPtr _mouseHook;
     private IntPtr _keyboardHook;
+    private IntPtr _moduleHandle;
 
     // Keep delegates rooted so GC never collects native hook callbacks
     private Win32Interop.LowLevelHookProc? _mouseProc;
@@ -43,6 +45,7 @@ public sealed class HostInputEngine : IDisposable
     private volatile ScreenEdge _switchEdge = ScreenEdge.Right;
     private volatile bool _disposed;
 
+    private ScreenRect _cachedVirtualBounds;
     private bool _hasLastAbs;
     private int _lastAbsX;
     private int _lastAbsY;
@@ -55,6 +58,7 @@ public sealed class HostInputEngine : IDisposable
     {
         _motionCoalescer = motionCoalescer;
         _stateMachine = new EdgeSwitchStateMachine(edgeResistancePixels, cooldownMs);
+        RefreshVirtualBounds();
     }
 
     public ChannelReader<CapturedInputEvent> Events => _events.Reader;
@@ -76,6 +80,7 @@ public sealed class HostInputEngine : IDisposable
             {
                 ForceReturnToLocal(0.5f);
             }
+            SetCaptureHooksActive(value);
         }
     }
 
@@ -86,6 +91,8 @@ public sealed class HostInputEngine : IDisposable
         using var ready = new ManualResetEventSlim(false);
         Exception? initError = null;
 
+        SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+
         _hookThread = new Thread(() =>
         {
             try
@@ -95,18 +102,10 @@ public sealed class HostInputEngine : IDisposable
                 _ = _marshalingControl.Handle;
                 _overlay = new CursorHiderOverlay();
                 _rawWindow = new RawInputWindow(HandleRawMouseInput);
-
                 _mouseProc = MouseHookCallback;
                 _keyboardProc = KeyboardHookCallback;
-
-                IntPtr hMod = Win32Interop.GetModuleHandle(Process.GetCurrentProcess().MainModule?.ModuleName);
-                _mouseHook = Win32Interop.SetWindowsHookEx(Win32Interop.WH_MOUSE_LL, _mouseProc, hMod, 0);
-                _keyboardHook = Win32Interop.SetWindowsHookEx(Win32Interop.WH_KEYBOARD_LL, _keyboardProc, hMod, 0);
-
-                if (_mouseHook == IntPtr.Zero || _keyboardHook == IntPtr.Zero)
-                {
-                    throw new InvalidOperationException($"Failed to install input hooks (Win32 error {Marshal.GetLastWin32Error()}).");
-                }
+                using var proc = Process.GetCurrentProcess();
+                _moduleHandle = Win32Interop.GetModuleHandle(proc.MainModule?.ModuleName);
             }
             catch (Exception ex)
             {
@@ -134,7 +133,59 @@ public sealed class HostInputEngine : IDisposable
 
         if (initError is not null)
         {
+            SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
             throw new InvalidOperationException("Failed to initialize Host input engine.", initError);
+        }
+    }
+
+    private void OnDisplaySettingsChanged(object? sender, EventArgs e) => RefreshVirtualBounds();
+
+    private void RefreshVirtualBounds()
+    {
+        var (vLeft, vTop, vWidth, vHeight) = Win32Interop.GetVirtualScreenBounds();
+        _cachedVirtualBounds = new ScreenRect(vLeft, vTop, vWidth, vHeight);
+    }
+
+    private void SetCaptureHooksActive(bool active)
+    {
+        if (_disposed || _marshalingControl is not { IsHandleCreated: true }) return;
+
+        _marshalingControl.BeginInvoke(() =>
+        {
+            if (_disposed || _rawWindow is null) return;
+
+            if (active)
+            {
+                RefreshVirtualBounds();
+                _rawWindow.SetRegistered(true);
+                if (_mouseHook == IntPtr.Zero && _mouseProc is not null)
+                {
+                    _mouseHook = Win32Interop.SetWindowsHookEx(Win32Interop.WH_MOUSE_LL, _mouseProc, _moduleHandle, 0);
+                }
+                if (_keyboardHook == IntPtr.Zero && _keyboardProc is not null)
+                {
+                    _keyboardHook = Win32Interop.SetWindowsHookEx(Win32Interop.WH_KEYBOARD_LL, _keyboardProc, _moduleHandle, 0);
+                }
+            }
+            else
+            {
+                _rawWindow.SetRegistered(false);
+                UnhookCaptureHooks();
+            }
+        });
+    }
+
+    private void UnhookCaptureHooks()
+    {
+        if (_mouseHook != IntPtr.Zero)
+        {
+            Win32Interop.UnhookWindowsHookEx(_mouseHook);
+            _mouseHook = IntPtr.Zero;
+        }
+        if (_keyboardHook != IntPtr.Zero)
+        {
+            Win32Interop.UnhookWindowsHookEx(_keyboardHook);
+            _keyboardHook = IntPtr.Zero;
         }
     }
 
@@ -151,8 +202,8 @@ public sealed class HostInputEngine : IDisposable
             _motionCoalescer.Reset();
             _hasLastAbs = false;
 
-            var (vLeft, vTop, vWidth, vHeight) = Win32Interop.GetVirtualScreenBounds();
-            var bounds = new ScreenRect(vLeft, vTop, vWidth, vHeight);
+            RefreshVirtualBounds();
+            ScreenRect bounds = _cachedVirtualBounds;
             var (rx, ry) = EdgeSwitchStateMachine.ComputeEntryPoint(bounds, edge, ratio, insetPx: 8);
             bool moved = Win32Interop.SetCursorPos(rx, ry);
             _overlay?.HideOverlay();
@@ -176,8 +227,6 @@ public sealed class HostInputEngine : IDisposable
         _motionCoalescer.Reset();
         _hasLastAbs = false;
 
-        // Place overlay spanning all virtual monitors and keep cursor parked at the exit edge
-        // (never jump to screen center) so return transitions never expose a centered cursor.
         _overlay?.ShowOverVirtualScreen(bounds);
         var (parkX, parkY) = EdgeSwitchStateMachine.ComputeEntryPoint(bounds, _switchEdge, ratio, insetPx: 2);
         Win32Interop.SetCursorPos(parkX, parkY);
@@ -198,9 +247,9 @@ public sealed class HostInputEngine : IDisposable
         }
         else
         {
-            var (_, _, vW, vH) = Win32Interop.GetVirtualScreenBounds();
-            int absX = (int)Math.Round(mouse.lLastX / 65535.0 * vW);
-            int absY = (int)Math.Round(mouse.lLastY / 65535.0 * vH);
+            ScreenRect b = _cachedVirtualBounds;
+            int absX = (int)Math.Round(mouse.lLastX / 65535.0 * b.Width);
+            int absY = (int)Math.Round(mouse.lLastY / 65535.0 * b.Height);
             if (_hasLastAbs)
             {
                 dx = absX - _lastAbsX;
@@ -223,9 +272,7 @@ public sealed class HostInputEngine : IDisposable
 
         if (Win32Interop.GetCursorPos(out var pt))
         {
-            var (vLeft, vTop, vWidth, vHeight) = Win32Interop.GetVirtualScreenBounds();
-            var bounds = new ScreenRect(vLeft, vTop, vWidth, vHeight);
-
+            ScreenRect bounds = _cachedVirtualBounds;
             if (_stateMachine.TryShouldSwitchToClient(
                     pt.X, pt.Y, dx, dy, bounds, _switchEdge, _clock.ElapsedMilliseconds, out float ratio))
             {
@@ -239,8 +286,6 @@ public sealed class HostInputEngine : IDisposable
         if (nCode >= 0 && _stateMachine.IsRemote)
         {
             int msg = wParam.ToInt32();
-            var hookStruct = Marshal.PtrToStructure<Win32Interop.MSLLHOOKSTRUCT>(lParam);
-
             switch (msg)
             {
                 case Win32Interop.WM_MOUSEMOVE:
@@ -265,6 +310,7 @@ public sealed class HostInputEngine : IDisposable
                     return (IntPtr)1;
                 case Win32Interop.WM_XBUTTONDOWN:
                 {
+                    var hookStruct = Marshal.PtrToStructure<Win32Interop.MSLLHOOKSTRUCT>(lParam);
                     ushort xBtn = (ushort)((hookStruct.mouseData >> 16) & 0xFFFF);
                     _events.Writer.TryWrite(new CapturedMouseButtonEvent(
                         xBtn == 2 ? MouseButtonKind.XButton2 : MouseButtonKind.XButton1, true));
@@ -272,6 +318,7 @@ public sealed class HostInputEngine : IDisposable
                 }
                 case Win32Interop.WM_XBUTTONUP:
                 {
+                    var hookStruct = Marshal.PtrToStructure<Win32Interop.MSLLHOOKSTRUCT>(lParam);
                     ushort xBtn = (ushort)((hookStruct.mouseData >> 16) & 0xFFFF);
                     _events.Writer.TryWrite(new CapturedMouseButtonEvent(
                         xBtn == 2 ? MouseButtonKind.XButton2 : MouseButtonKind.XButton1, false));
@@ -279,12 +326,14 @@ public sealed class HostInputEngine : IDisposable
                 }
                 case Win32Interop.WM_MOUSEWHEEL:
                 {
+                    var hookStruct = Marshal.PtrToStructure<Win32Interop.MSLLHOOKSTRUCT>(lParam);
                     short delta = unchecked((short)((hookStruct.mouseData >> 16) & 0xFFFF));
                     _events.Writer.TryWrite(new CapturedMouseWheelEvent(delta, false));
                     return (IntPtr)1;
                 }
                 case Win32Interop.WM_MOUSEHWHEEL:
                 {
+                    var hookStruct = Marshal.PtrToStructure<Win32Interop.MSLLHOOKSTRUCT>(lParam);
                     short delta = unchecked((short)((hookStruct.mouseData >> 16) & 0xFFFF));
                     _events.Writer.TryWrite(new CapturedMouseWheelEvent(delta, true));
                     return (IntPtr)1;
@@ -303,7 +352,6 @@ public sealed class HostInputEngine : IDisposable
             bool isKeyUp = (kb.flags & Win32Interop.LLKHF_UP) != 0;
             bool isExtended = (kb.flags & Win32Interop.LLKHF_EXTENDED) != 0;
 
-            // Local emergency escape: Ctrl + Alt + Esc always restores Host immediately
             if (!isKeyUp && kb.vkCode == Win32Interop.VK_ESCAPE && IsCtrlAltHeld())
             {
                 _marshalingControl?.BeginInvoke(() =>
@@ -339,6 +387,7 @@ public sealed class HostInputEngine : IDisposable
         if (_disposed) return;
         _disposed = true;
 
+        SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         _events.Writer.TryComplete();
 
         if (_marshalingControl is not null && _appContext is not null)
@@ -347,19 +396,11 @@ public sealed class HostInputEngine : IDisposable
             {
                 _marshalingControl.Invoke(() =>
                 {
-                    if (_mouseHook != IntPtr.Zero)
-                    {
-                        Win32Interop.UnhookWindowsHookEx(_mouseHook);
-                        _mouseHook = IntPtr.Zero;
-                    }
-                    if (_keyboardHook != IntPtr.Zero)
-                    {
-                        Win32Interop.UnhookWindowsHookEx(_keyboardHook);
-                        _keyboardHook = IntPtr.Zero;
-                    }
+                    UnhookCaptureHooks();
+                    _rawWindow?.SetRegistered(false);
                     _overlay?.HideOverlay();
                     _overlay?.Dispose();
-                    _rawWindow?.DestroyHandle();
+                    _rawWindow?.Dispose();
                     _marshalingControl.Dispose();
                     _appContext.ExitThread();
                 });
@@ -373,19 +414,29 @@ public sealed class HostInputEngine : IDisposable
         _hookThread?.Join(1000);
     }
 
-    private sealed class RawInputWindow : NativeWindow
+    private sealed class RawInputWindow : NativeWindow, IDisposable
     {
         private readonly Action<Win32Interop.RAWMOUSE> _onMouse;
+        private readonly uint _headerSize = (uint)Marshal.SizeOf<Win32Interop.RAWINPUTHEADER>();
+        private IntPtr _buffer;
+        private uint _bufferCapacity = 256;
+        private bool _registered;
 
         public RawInputWindow(Action<Win32Interop.RAWMOUSE> onMouse)
         {
             _onMouse = onMouse;
+            _buffer = Marshal.AllocHGlobal((int)_bufferCapacity);
 
             CreateHandle(new CreateParams
             {
                 Caption = "LanKvmRawInputSink",
                 Parent = Win32Interop.HWND_MESSAGE
             });
+        }
+
+        public void SetRegistered(bool enable)
+        {
+            if (_registered == enable) return;
 
             var devices = new[]
             {
@@ -393,14 +444,14 @@ public sealed class HostInputEngine : IDisposable
                 {
                     usUsagePage = Win32Interop.HID_USAGE_PAGE_GENERIC,
                     usUsage = Win32Interop.HID_USAGE_GENERIC_MOUSE,
-                    dwFlags = Win32Interop.RIDEV_INPUTSINK,
-                    hwndTarget = Handle
+                    dwFlags = enable ? Win32Interop.RIDEV_INPUTSINK : Win32Interop.RIDEV_REMOVE,
+                    hwndTarget = enable ? Handle : IntPtr.Zero
                 }
             };
 
-            if (!Win32Interop.RegisterRawInputDevices(devices, (uint)devices.Length, (uint)Marshal.SizeOf<Win32Interop.RAWINPUTDEVICE>()))
+            if (Win32Interop.RegisterRawInputDevices(devices, (uint)devices.Length, (uint)Marshal.SizeOf<Win32Interop.RAWINPUTDEVICE>()))
             {
-                throw new InvalidOperationException($"RegisterRawInputDevices failed ({Marshal.GetLastWin32Error()}).");
+                _registered = enable;
             }
         }
 
@@ -416,26 +467,34 @@ public sealed class HostInputEngine : IDisposable
         private void ProcessRawInput(IntPtr hRawInput)
         {
             uint size = 0;
-            uint headerSize = (uint)Marshal.SizeOf<Win32Interop.RAWINPUTHEADER>();
-            if (Win32Interop.GetRawInputData(hRawInput, Win32Interop.RID_INPUT, IntPtr.Zero, ref size, headerSize) != 0 || size == 0)
+            if (Win32Interop.GetRawInputData(hRawInput, Win32Interop.RID_INPUT, IntPtr.Zero, ref size, _headerSize) != 0 || size == 0)
                 return;
 
-            IntPtr buffer = Marshal.AllocHGlobal((int)size);
-            try
+            if (size > _bufferCapacity)
             {
-                if (Win32Interop.GetRawInputData(hRawInput, Win32Interop.RID_INPUT, buffer, ref size, headerSize) != size)
-                    return;
-
-                var header = Marshal.PtrToStructure<Win32Interop.RAWINPUTHEADER>(buffer);
-                if (header.dwType == Win32Interop.RIM_TYPEMOUSE)
-                {
-                    var mouse = Marshal.PtrToStructure<Win32Interop.RAWMOUSE>(IntPtr.Add(buffer, (int)headerSize));
-                    _onMouse(mouse);
-                }
+                Marshal.FreeHGlobal(_buffer);
+                _bufferCapacity = size;
+                _buffer = Marshal.AllocHGlobal((int)_bufferCapacity);
             }
-            finally
+
+            if (Win32Interop.GetRawInputData(hRawInput, Win32Interop.RID_INPUT, _buffer, ref size, _headerSize) != size)
+                return;
+
+            var header = Marshal.PtrToStructure<Win32Interop.RAWINPUTHEADER>(_buffer);
+            if (header.dwType == Win32Interop.RIM_TYPEMOUSE)
             {
-                Marshal.FreeHGlobal(buffer);
+                var mouse = Marshal.PtrToStructure<Win32Interop.RAWMOUSE>(IntPtr.Add(_buffer, (int)_headerSize));
+                _onMouse(mouse);
+            }
+        }
+
+        public void Dispose()
+        {
+            DestroyHandle();
+            if (_buffer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(_buffer);
+                _buffer = IntPtr.Zero;
             }
         }
     }

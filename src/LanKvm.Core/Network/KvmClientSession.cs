@@ -11,6 +11,7 @@ using LanKvm.Core.Input;
 using LanKvm.Core.Native;
 using LanKvm.Core.Update;
 using LanKvm.Protocol;
+using Microsoft.Win32;
 
 namespace LanKvm.Core.Network;
 
@@ -20,6 +21,7 @@ public sealed record ClientStatusSnapshot(
     bool IsControlledByHost,
     bool IsUdpActive,
     bool IsPaired,
+    bool IsAutoReconnecting,
     string HostName,
     string ServerFingerprintShort,
     string StatusMessage);
@@ -42,9 +44,11 @@ public sealed class KvmClientSession : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly bool _autoReconnect;
     private readonly bool _autoSyncUpdateFromHost;
+    private readonly SemaphoreSlim _wakeSignal = new(0, 1);
 
     private string? _savedClientId;
     private byte[]? _savedRawToken;
+    private CancellationTokenSource? _activeAttemptCts;
 
     private FramedControlTransport? _transport;
     private FileStream? _updateStream;
@@ -54,8 +58,10 @@ public sealed class KvmClientSession : IDisposable
     private bool _disposed;
     private string _hostName = "-";
     private string _serverFingerprintHex = string.Empty;
+    private string? _lastLoggedConnectError;
     private bool _isConnected;
     private bool _isUdpActive;
+    private bool _isAutoReconnecting;
 
     public event Action<ClientStatusSnapshot>? StatusChanged;
     public event Action<string, string>? TrustedFingerprintObserved;
@@ -126,23 +132,55 @@ public sealed class KvmClientSession : IDisposable
     public void Start()
     {
         _clipboard.Start();
+        SystemEvents.PowerModeChanged += OnPowerModeChanged;
         _ = Task.Run(() => RunWithReconnectAsync(_cts.Token));
+    }
+
+    private void OnPowerModeChanged(object? sender, PowerModeChangedEventArgs e)
+    {
+        if (e.Mode == PowerModes.Resume && !_disposed)
+        {
+            Log("노트북 절전 해제 감지 — 즉시 Host 재연결 시도");
+            try { _activeAttemptCts?.Cancel(); } catch { }
+            if (_wakeSignal.CurrentCount == 0)
+            {
+                try { _wakeSignal.Release(); } catch { }
+            }
+        }
     }
 
     private async Task RunWithReconnectAsync(CancellationToken ct)
     {
+        int consecutiveFailures = 0;
+        _isAutoReconnecting = _autoReconnect;
+
         while (!ct.IsCancellationRequested)
         {
-            bool shouldRetry = await RunSingleSessionAsync(ct).ConfigureAwait(false);
+            using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            _activeAttemptCts = attemptCts;
+
+            bool shouldRetry = await RunSingleSessionAsync(attemptCts.Token, ct).ConfigureAwait(false);
+            _activeAttemptCts = null;
+
             if (!shouldRetry || !_autoReconnect || ct.IsCancellationRequested)
             {
                 break;
             }
 
-            PublishStatus("2.5초 후 재연결 시도...", connecting: true);
+            consecutiveFailures = Math.Min(consecutiveFailures + 1, 4);
+            double delaySec = consecutiveFailures switch
+            {
+                1 => 1.5,
+                2 => 2.5,
+                3 => 4.0,
+                _ => 6.0
+            };
+
+            PublishStatus($"Host 대기 중 (자동 연결 활성 · {delaySec:0.#}초 후 재시도)", connecting: true);
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(2.5), ct).ConfigureAwait(false);
+                await _wakeSignal.WaitAsync(TimeSpan.FromSeconds(delaySec), ct).ConfigureAwait(false);
+                consecutiveFailures = 0;
             }
             catch (OperationCanceledException)
             {
@@ -150,10 +188,11 @@ public sealed class KvmClientSession : IDisposable
             }
         }
 
+        _isAutoReconnecting = false;
         PublishStatus("연결 종료됨");
     }
 
-    private async Task<bool> RunSingleSessionAsync(CancellationToken ct)
+    private async Task<bool> RunSingleSessionAsync(CancellationToken attemptCt, CancellationToken outerCt)
     {
         bool hasToken = !string.IsNullOrEmpty(_savedClientId) && _savedRawToken is { Length: > 0 };
         if (!hasToken && (_pin.Length != 6 || !_pin.All(char.IsDigit)))
@@ -171,11 +210,14 @@ public sealed class KvmClientSession : IDisposable
         try
         {
             PublishStatus($"{_hostIp}:{_tcpPort} 연결 시도 중...", connecting: true);
-            Log($"Host 연결 시도: {_hostIp}:{_tcpPort} ({(hasToken ? "등록 기기 자동 인증" : "최초 PIN 페어링")})");
-
-            using (var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            if (_lastLoggedConnectError is null)
             {
-                connectCts.CancelAfter(TimeSpan.FromSeconds(6));
+                Log($"Host 연결 시도: {_hostIp}:{_tcpPort} ({(hasToken ? "등록 기기 자동 인증" : "최초 PIN 페어링")})");
+            }
+
+            using (var connectCts = CancellationTokenSource.CreateLinkedTokenSource(attemptCt))
+            {
+                connectCts.CancelAfter(TimeSpan.FromSeconds(3));
                 await tcp.ConnectAsync(_hostIp, _tcpPort, connectCts.Token).ConfigureAwait(false);
             }
 
@@ -202,13 +244,13 @@ public sealed class KvmClientSession : IDisposable
                     TargetHost = _hostIp,
                     CertificateRevocationCheckMode = X509RevocationMode.NoCheck
                 },
-                ct).ConfigureAwait(false);
+                attemptCt).ConfigureAwait(false);
 
             _serverFingerprintHex = observedFingerprint ?? string.Empty;
             using var transport = new FramedControlTransport(ssl);
             _transport = transport;
 
-            ControlFrame? challengeFrame = await transport.ReceiveAsync(ct).ConfigureAwait(false);
+            ControlFrame? challengeFrame = await transport.ReceiveAsync(attemptCt).ConfigureAwait(false);
             if (challengeFrame is null || challengeFrame.Type != MessageType.PinChallenge)
             {
                 throw new InvalidDataException("서버로부터 인증 챌린지를 받지 못했습니다.");
@@ -239,9 +281,9 @@ public sealed class KvmClientSession : IDisposable
             await transport.SendAsync(
                 MessageType.PinResponse,
                 PacketCodec.EncodePinResponse(authReq),
-                ct).ConfigureAwait(false);
+                attemptCt).ConfigureAwait(false);
 
-            ControlFrame? authFrame = await transport.ReceiveAsync(ct).ConfigureAwait(false);
+            ControlFrame? authFrame = await transport.ReceiveAsync(attemptCt).ConfigureAwait(false);
             if (authFrame is null || authFrame.Type != MessageType.AuthResult)
             {
                 throw new InvalidDataException("인증 응답을 받지 못했습니다.");
@@ -276,6 +318,7 @@ public sealed class KvmClientSession : IDisposable
                 TrustedFingerprintObserved?.Invoke(endpointKey, _serverFingerprintHex);
             }
 
+            _lastLoggedConnectError = null;
             _hostName = auth.HostName;
             _isConnected = true;
 
@@ -291,7 +334,7 @@ public sealed class KvmClientSession : IDisposable
                 {
                     _expectedUpdateSha256 = auth.ExeSha256;
                     Log($"Host가 더 최신 버전(v{auth.AppVersion} > v{selfInfo.Version})입니다. LAN 자동 업데이트를 요청합니다...");
-                    await transport.SendAsync(MessageType.UpdateRequest, ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
+                    await transport.SendAsync(MessageType.UpdateRequest, ReadOnlyMemory<byte>.Empty, attemptCt).ConfigureAwait(false);
                 }
             }
 
@@ -299,7 +342,7 @@ public sealed class KvmClientSession : IDisposable
             IPAddress remoteIp = ((IPEndPoint)tcp.Client.RemoteEndPoint!).Address;
             var udpHostEp = new IPEndPoint(remoteIp, _udpPort);
 
-            using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(attemptCt);
             var udpHelloTask = Task.Run(() => UdpHelloLoopAsync(udp, udpHostEp, udpCrypto, sessionCts.Token), sessionCts.Token);
             var udpRecvTask = Task.Run(() => UdpReceiveLoopAsync(udp, udpCrypto, sessionCts.Token), sessionCts.Token);
             try
@@ -318,7 +361,7 @@ public sealed class KvmClientSession : IDisposable
         }
         catch (OperationCanceledException)
         {
-            return false;
+            return !outerCt.IsCancellationRequested;
         }
         catch (Exception ex)
         {
@@ -329,8 +372,12 @@ public sealed class KvmClientSession : IDisposable
                 return false;
             }
 
-            Log($"연결 오류: {ex.Message}");
-            PublishStatus($"연결 끊김: {ex.Message}");
+            if (!string.Equals(_lastLoggedConnectError, ex.Message, StringComparison.Ordinal))
+            {
+                _lastLoggedConnectError = ex.Message;
+                Log($"Host 대기/재시도 중 ({ex.Message})");
+            }
+            PublishStatus("Host 대기 중 (자동 연결 활성)", connecting: _autoReconnect);
             return true;
         }
         finally
@@ -358,7 +405,7 @@ public sealed class KvmClientSession : IDisposable
             await Task.Delay(200, ct).ConfigureAwait(false);
         }
 
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2.5));
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(4));
         while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
         {
             int len = crypto.EncryptClientHello(Stopwatch.GetTimestamp(), packet);
@@ -586,6 +633,7 @@ public sealed class KvmClientSession : IDisposable
             IsControlledByHost: _injector.IsControlledByHost,
             IsUdpActive: _isUdpActive,
             IsPaired: isPaired,
+            IsAutoReconnecting: _isAutoReconnecting,
             HostName: _hostName,
             ServerFingerprintShort: TlsPairing.FormatFingerprintShort(_serverFingerprintHex),
             StatusMessage: msg));
@@ -597,10 +645,12 @@ public sealed class KvmClientSession : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        SystemEvents.PowerModeChanged -= OnPowerModeChanged;
         _cts.Cancel();
         CleanupPendingUpdateStream();
         _clipboard.Dispose();
-        _injector.DeactivateAndReleaseAll();
+        _injector.Dispose();
+        _wakeSignal.Dispose();
         _cts.Dispose();
     }
 }

@@ -592,12 +592,13 @@ public sealed class KvmHostSession : IDisposable
 
     private async Task HeartbeatLoopAsync(ActiveClientContext ctx)
     {
-        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(500));
+        int lastPublishedRtt = -1;
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(1500));
         while (await timer.WaitForNextTickAsync(ctx.Cts.Token).ConfigureAwait(false))
         {
             long now = Stopwatch.GetTimestamp();
             double silentMs = (now - ctx.LastAckTicks) * 1000.0 / Stopwatch.Frequency;
-            if (silentMs > 3000)
+            if (silentMs > 4500)
             {
                 Log($"클라이언트 응답 없음 ({silentMs:F0}ms) — 안전 복구 실행");
                 ctx.Cts.Cancel();
@@ -608,7 +609,12 @@ public sealed class KvmHostSession : IDisposable
                 MessageType.Heartbeat,
                 PacketCodec.EncodeHeartbeat(now),
                 ctx.Cts.Token).ConfigureAwait(false);
-            PublishStatus();
+
+            if (Math.Abs(ctx.RttMs - lastPublishedRtt) >= 3)
+            {
+                lastPublishedRtt = ctx.RttMs;
+                PublishStatus();
+            }
         }
     }
 
@@ -656,11 +662,17 @@ public sealed class KvmHostSession : IDisposable
     private async Task MotionSendLoopAsync(CancellationToken ct)
     {
         byte[] packetBuf = new byte[UdpMotionCrypto.MotionPacketSize];
-        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(6));
 
-        while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
+        while (!ct.IsCancellationRequested)
         {
-            if (!_inputEngine.IsRemote) continue;
+            await _coalescer.WaitForDataAsync(ct).ConfigureAwait(false);
+            await Task.Delay(6, ct).ConfigureAwait(false);
+
+            if (!_inputEngine.IsRemote)
+            {
+                _coalescer.Reset();
+                continue;
+            }
             if (!_coalescer.TryDrain(out int dx, out int dy)) continue;
 
             ActiveClientContext? ctx;
@@ -669,7 +681,7 @@ public sealed class KvmHostSession : IDisposable
 
             IPEndPoint? udpEp = ctx.UdpEndpoint;
             bool udpFresh = udpEp is not null &&
-                            (Stopwatch.GetTimestamp() - ctx.LastUdpHelloTicks) * 1000.0 / Stopwatch.Frequency < 7500;
+                            (Stopwatch.GetTimestamp() - ctx.LastUdpHelloTicks) * 1000.0 / Stopwatch.Frequency < 12000;
 
             try
             {
@@ -831,6 +843,7 @@ public sealed class KvmHostSession : IDisposable
         _udpSocket?.Dispose();
         _clipboard.Dispose();
         _inputEngine.Dispose();
+        _coalescer.Dispose();
         _certificate.Dispose();
         _unauthLimiter.Dispose();
         _cts.Dispose();

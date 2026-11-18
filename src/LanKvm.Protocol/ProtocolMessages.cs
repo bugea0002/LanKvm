@@ -87,11 +87,16 @@ public static class PacketCodec
         await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    public static ValueTask<ControlFrame?> ReadFrameAsync(
+        Stream stream,
+        CancellationToken cancellationToken = default) =>
+        ReadFrameAsync(stream, new byte[4], cancellationToken);
+
     public static async ValueTask<ControlFrame?> ReadFrameAsync(
         Stream stream,
+        byte[] lenBuf,
         CancellationToken cancellationToken = default)
     {
-        byte[] lenBuf = new byte[4];
         int firstRead = await ReadExactOrZeroOnEofAsync(stream, lenBuf, cancellationToken).ConfigureAwait(false);
         if (firstRead == 0)
         {
@@ -357,6 +362,7 @@ public sealed class FramedControlTransport : IDisposable
 {
     private readonly Stream _stream;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private readonly byte[] _readLenBuf = new byte[4];
     private bool _disposed;
 
     public FramedControlTransport(Stream stream)
@@ -381,7 +387,7 @@ public sealed class FramedControlTransport : IDisposable
     }
 
     public ValueTask<ControlFrame?> ReceiveAsync(CancellationToken cancellationToken = default) =>
-        PacketCodec.ReadFrameAsync(_stream, cancellationToken);
+        PacketCodec.ReadFrameAsync(_stream, _readLenBuf, cancellationToken);
 
     public void Dispose()
     {

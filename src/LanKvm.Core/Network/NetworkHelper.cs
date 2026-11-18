@@ -195,4 +195,21 @@ public static class NetworkHelper
             return false;
         }
     }
+
+    public static void TrimBackgroundMemory()
+    {
+        try
+        {
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Optimized, blocking: false);
+            if (OperatingSystem.IsWindows())
+            {
+                using var proc = Process.GetCurrentProcess();
+                Native.Win32Interop.SetProcessWorkingSetSize(proc.Handle, new IntPtr(-1), new IntPtr(-1));
+            }
+        }
+        catch
+        {
+            // Non-critical optimization
+        }
+    }
 }

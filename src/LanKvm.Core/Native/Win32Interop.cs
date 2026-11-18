@@ -35,6 +35,7 @@ public static class Win32Interop
     public const int SM_CYVIRTUALSCREEN = 79;
 
     public const uint RID_INPUT = 0x10000003;
+    public const uint RIDEV_REMOVE = 0x00000001;
     public const uint RIDEV_INPUTSINK = 0x00000100;
     public const ushort HID_USAGE_PAGE_GENERIC = 0x01;
     public const ushort HID_USAGE_GENERIC_MOUSE = 0x02;
@@ -258,6 +259,10 @@ public static class Win32Interop
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool DestroyCursor(IntPtr hCursor);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetProcessWorkingSetSize(IntPtr hProcess, IntPtr dwMinimumWorkingSetSize, IntPtr dwMaximumWorkingSetSize);
 
     public static (int Left, int Top, int Width, int Height) GetVirtualScreenBounds()
     {

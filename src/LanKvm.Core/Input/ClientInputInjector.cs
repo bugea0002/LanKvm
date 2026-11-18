@@ -2,30 +2,39 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using LanKvm.Core.Native;
 using LanKvm.Protocol;
+using Microsoft.Win32;
 
 namespace LanKvm.Core.Input;
 
 /// <summary>
 /// Injects remote mouse and keyboard events into the Client OS via Win32 SendInput
-/// and detects return-edge pushes back to the Host.
+/// with cached bounds and reusable input buffers, and detects return-edge pushes.
 /// </summary>
-public sealed class ClientInputInjector
+public sealed class ClientInputInjector : IDisposable
 {
+    private static readonly int InputSize = Marshal.SizeOf<Win32Interop.INPUT>();
+
     private readonly SubPixelAccumulator _subPixel = new();
     private readonly EdgeSwitchStateMachine _returnState;
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private readonly object _keysLock = new();
+    private readonly object _sendLock = new();
+    private readonly Win32Interop.INPUT[] _singleInput = new Win32Interop.INPUT[1];
     private readonly HashSet<(ushort Vk, ushort Scan, bool Ext)> _pressedKeys = new();
 
+    private ScreenRect _cachedBounds;
     private volatile bool _isControlledByHost;
     private volatile ScreenEdge _hostSwitchEdge = ScreenEdge.Right;
     private double _sensitivity = 1.0;
+    private bool _disposed;
 
     public event Action<ScreenEdge, float>? ReturnToHostRequested;
 
     public ClientInputInjector(int returnResistancePixels = 16, long cooldownMs = 150)
     {
         _returnState = new EdgeSwitchStateMachine(returnResistancePixels, cooldownMs);
+        RefreshBounds();
+        SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
     }
 
     public double Sensitivity
@@ -36,6 +45,14 @@ public sealed class ClientInputInjector
 
     public bool IsControlledByHost => _isControlledByHost;
 
+    private void OnDisplaySettingsChanged(object? sender, EventArgs e) => RefreshBounds();
+
+    private void RefreshBounds()
+    {
+        var (vLeft, vTop, vWidth, vHeight) = Win32Interop.GetVirtualScreenBounds();
+        _cachedBounds = new ScreenRect(vLeft, vTop, vWidth, vHeight);
+    }
+
     public void ActivateFromHost(ScreenEdge hostSwitchEdge, float ratio)
     {
         _hostSwitchEdge = hostSwitchEdge;
@@ -43,10 +60,9 @@ public sealed class ClientInputInjector
         _returnState.ResetToLocal(_clock.ElapsedMilliseconds);
         _isControlledByHost = true;
 
-        var (vLeft, vTop, vWidth, vHeight) = Win32Interop.GetVirtualScreenBounds();
-        var bounds = new ScreenRect(vLeft, vTop, vWidth, vHeight);
+        RefreshBounds();
         ScreenEdge entryEdge = EdgeSwitchStateMachine.OppositeEdge(hostSwitchEdge);
-        var (x, y) = EdgeSwitchStateMachine.ComputeEntryPoint(bounds, entryEdge, ratio, insetPx: 8);
+        var (x, y) = EdgeSwitchStateMachine.ComputeEntryPoint(_cachedBounds, entryEdge, ratio, insetPx: 8);
         Win32Interop.SetCursorPos(x, y);
     }
 
@@ -62,7 +78,7 @@ public sealed class ClientInputInjector
         var (dx, dy) = _subPixel.Scale(rawDx, rawDy, _sensitivity);
         if (dx == 0 && dy == 0) return;
 
-        var input = new Win32Interop.INPUT
+        SendSingleInput(new Win32Interop.INPUT
         {
             type = Win32Interop.INPUT_MOUSE,
             u = new Win32Interop.INPUTUNION
@@ -77,17 +93,12 @@ public sealed class ClientInputInjector
                     dwExtraInfo = Win32Interop.SyntheticExtraInfo
                 }
             }
-        };
-
-        Win32Interop.SendInput(1, [input], Marshal.SizeOf<Win32Interop.INPUT>());
+        });
 
         if (_isControlledByHost && Win32Interop.GetCursorPos(out var pt))
         {
-            var (vLeft, vTop, vWidth, vHeight) = Win32Interop.GetVirtualScreenBounds();
-            var bounds = new ScreenRect(vLeft, vTop, vWidth, vHeight);
-
             if (_returnState.TryShouldReturnToHost(
-                    pt.X, pt.Y, dx, dy, bounds, _hostSwitchEdge, _clock.ElapsedMilliseconds, out float ratio))
+                    pt.X, pt.Y, dx, dy, _cachedBounds, _hostSwitchEdge, _clock.ElapsedMilliseconds, out float ratio))
             {
                 _isControlledByHost = false;
                 ReleaseAllPressedKeys();
@@ -124,7 +135,7 @@ public sealed class ClientInputInjector
                 return;
         }
 
-        var input = new Win32Interop.INPUT
+        SendSingleInput(new Win32Interop.INPUT
         {
             type = Win32Interop.INPUT_MOUSE,
             u = new Win32Interop.INPUTUNION
@@ -139,14 +150,12 @@ public sealed class ClientInputInjector
                     dwExtraInfo = Win32Interop.SyntheticExtraInfo
                 }
             }
-        };
-
-        Win32Interop.SendInput(1, [input], Marshal.SizeOf<Win32Interop.INPUT>());
+        });
     }
 
     public void InjectMouseWheel(MouseWheelPayload p)
     {
-        var input = new Win32Interop.INPUT
+        SendSingleInput(new Win32Interop.INPUT
         {
             type = Win32Interop.INPUT_MOUSE,
             u = new Win32Interop.INPUTUNION
@@ -161,9 +170,7 @@ public sealed class ClientInputInjector
                     dwExtraInfo = Win32Interop.SyntheticExtraInfo
                 }
             }
-        };
-
-        Win32Interop.SendInput(1, [input], Marshal.SizeOf<Win32Interop.INPUT>());
+        });
     }
 
     public void InjectKeyEvent(KeyEventPayload p)
@@ -200,7 +207,7 @@ public sealed class ClientInputInjector
         }
     }
 
-    private static void SendKeyInput(ushort vk, ushort scan, bool isExtended, bool isKeyUp)
+    private void SendKeyInput(ushort vk, ushort scan, bool isExtended, bool isKeyUp)
     {
         bool useVirtualKeyOnly =
             vk == Win32Interop.VK_HANGUL ||
@@ -221,7 +228,7 @@ public sealed class ClientInputInjector
             flags |= Win32Interop.KEYEVENTF_KEYUP;
         }
 
-        var input = new Win32Interop.INPUT
+        SendSingleInput(new Win32Interop.INPUT
         {
             type = Win32Interop.INPUT_KEYBOARD,
             u = new Win32Interop.INPUTUNION
@@ -235,8 +242,23 @@ public sealed class ClientInputInjector
                     dwExtraInfo = Win32Interop.SyntheticExtraInfo
                 }
             }
-        };
+        });
+    }
 
-        Win32Interop.SendInput(1, [input], Marshal.SizeOf<Win32Interop.INPUT>());
+    private void SendSingleInput(Win32Interop.INPUT input)
+    {
+        lock (_sendLock)
+        {
+            _singleInput[0] = input;
+            Win32Interop.SendInput(1, _singleInput, InputSize);
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+        ReleaseAllPressedKeys();
     }
 }
