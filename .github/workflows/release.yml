@@ -1,0 +1,49 @@
+name: Build & Release LanKvm
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build & Test
+        shell: pwsh
+        run: |
+          dotnet build LanKvm.sln -c Release
+          dotnet test LanKvm.sln -c Release --no-build
+
+      - name: Publish Single-File EXE
+        shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          $tag = "$env:REF_NAME".TrimStart('v')
+          $ver = if ($tag -match '^\d+\.\d+\.\d+$') { $tag } else { "1.1.0" }
+          dotnet publish src/LanKvm.App/LanKvm.App.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:Version=$ver -o ./release
+          $hash = (Get-FileHash ./release/LanKvm.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  LanKvm.exe" | Out-File -Encoding ascii ./release/LanKvm.exe.sha256
+
+      - name: Upload GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ./release/LanKvm.exe
+            ./release/LanKvm.exe.sha256

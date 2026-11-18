@@ -1,0 +1,27 @@
+# Build outputs & packaged artifacts
+bin/
+obj/
+dist/
+release/
+TestResults/
+
+# IDE & user files
+.vs/
+*.user
+*.suo
+
+# Secrets, certificates, keys, runtime configs & binaries
+*.pfx
+*.p12
+*.pem
+*.key
+*.cer
+*.crt
+*.exe
+*.dll
+*.pdb
+*.log
+.env
+.env.*
+config.json
+host-cert.pfx
